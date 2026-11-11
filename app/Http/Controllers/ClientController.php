@@ -142,25 +142,32 @@ class ClientController extends Controller
 
     public function bulkAction(Request $request)
     {
-        $request->validate([
-            'action' => 'required|in:activate,suspend,delete',
-            'selected' => 'required|array|min:1',
+        $validated = $request->validate([
+            'action' => ['required', 'in:activate,suspend,delete'],
+            'client_ids' => ['required', 'array', 'min:1'],
+            'client_ids.*' => ['required', 'integer', 'distinct', 'exists:clients,id'],
         ]);
 
-        $clients = Client::whereIn('id', $request->selected)->get();
+        $clients = Client::whereIn('id', $validated['client_ids'])->get();
 
         foreach ($clients as $client) {
-            if ($request->action === 'delete') {
+            if ($validated['action'] === 'delete') {
                 AuditLog::log('bulk_deleted', 'Client', $client->id, $client->toArray(), null);
                 $client->delete();
             } else {
-                $newStatus = $request->action === 'activate' ? 'active' : 'suspended';
+                $newStatus = $validated['action'] === 'activate' ? 'active' : 'suspended';
                 $old = ['status' => $client->status];
                 $client->update(['status' => $newStatus]);
                 AuditLog::log('bulk_status_change', 'Client', $client->id, $old, ['status' => $newStatus]);
             }
         }
 
-        return back()->with('success', ucfirst($request->action).'d '.count($clients).' client(s).');
+        $actionLabel = match ($validated['action']) {
+            'activate' => 'Activated',
+            'suspend' => 'Suspended',
+            'delete' => 'Deleted',
+        };
+
+        return back()->with('success', $actionLabel.' '.$clients->count().' client(s).');
     }
 }
