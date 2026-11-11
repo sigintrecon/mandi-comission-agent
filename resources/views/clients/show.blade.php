@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -24,12 +24,37 @@
                         <p class="text-xs text-purple-200/70">Super Admin Portal</p>
                     </div>
                 </div>
-                <a href="{{ route('clients.index') }}" class="text-purple-200 hover:text-white">← Back to Clients</a>
+                <a href="{{ route('clients.index') }}" class="text-purple-200 hover:text-white">â† Back to Clients</a>
             </div>
         </div>
     </nav>
 
     <main class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 pb-10">
+    @if(session('success'))<div class="bg-green-500/20 border border-green-500/40 text-green-300 p-4 rounded-xl mb-6">{{ session('success') }}</div>@endif
+    @if(session('error'))<div class="bg-red-500/20 border border-red-500/40 text-red-300 p-4 rounded-xl mb-6">{{ session('error') }}</div>@endif
+    @if(session('info'))<div class="bg-blue-500/20 border border-blue-500/40 text-blue-300 p-4 rounded-xl mb-6">{{ session('info') }}</div>@endif
+
+    <div class="glass-card rounded-xl p-4 border border-white/10 mb-6 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+            <span class="text-2xl">🗄️</span>
+            <div>
+                <p class="text-sm font-semibold text-white">Database: <span class="font-mono text-purple-300">{{ $client->database_name }}</span></p>
+                @if($dbExists)
+                    <p class="text-xs text-green-400">✅ Database exists and is ready</p>
+                @else
+                    <p class="text-xs text-red-400">❌ Database NOT found — provisioning required</p>
+                @endif
+            </div>
+        </div>
+        @if(!$dbExists && auth()->user()->canManageClients())
+            <form method="POST" action="{{ route('clients.reprovision', $client) }}">
+                @csrf
+                <button type="submit" class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-semibold">
+                    🔧 Provision Database
+                </button>
+            </form>
+        @endif
+    </div>
         <div class="glass-card rounded-2xl p-8 border border-white/10">
             <div class="flex justify-between items-start mb-8">
                 <div>
@@ -132,7 +157,7 @@
     <!-- Password Change Modal -->
     <div id="passwordModal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
         <div class="glass-card rounded-2xl p-8 w-full max-w-md relative border border-purple-500/30">
-            <button onclick="closePasswordModal()" class="absolute top-4 right-4 text-white/50 hover:text-white">✕</button>
+            <button onclick="closePasswordModal()" class="absolute top-4 right-4 text-white/50 hover:text-white">âœ•</button>
             <h3 class="text-2xl font-bold text-white mb-6">Change Password</h3>
             <form method="POST" action="{{ route('clients.change-password', $client) }}" class="space-y-4">
                 @csrf

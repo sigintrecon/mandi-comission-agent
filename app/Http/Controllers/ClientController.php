@@ -2,19 +2,29 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\Client;
 use App\Models\AuditLog;
+use App\Models\Client;
+use App\Services\ClientDatabaseProvisioner;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class ClientController extends Controller
 {
+    protected ClientDatabaseProvisioner $provisioner;
+
+    public function __construct(ClientDatabaseProvisioner $provisioner)
+    {
+        $this->provisioner = $provisioner;
+    }
+
     public function index()
     {
         $clients = Client::orderBy('created_at', 'desc')->paginate(20);
         $totalClients = Client::count();
         $activeClients = Client::where('status', 'active')->count();
         $pendingClients = Client::where('status', 'pending')->count();
+
         return view('clients.index', compact('clients', 'totalClients', 'activeClients', 'pendingClients'));
     }
 
@@ -38,12 +48,40 @@ class ClientController extends Controller
             'status' => 'nullable|in:pending,active,suspended',
             'subscription_ends_at' => 'nullable|date',
         ]);
-        $validated['status'] = $validated['status'] ?? 'pending';
-        $client = Client::create($validated);
 
+        // Create the client record (status = pending initially)
+        $validated['status'] = 'pending';
+        $client = Client::create($validated);
         AuditLog::log('created', 'Client', $client->id, null, $client->toArray());
 
-        return redirect()->route('clients.index')->with('success', 'Client "' . $client->name . '" created successfully! (Slug: ' . $client->slug . ')');
+        // Auto-provision the client database
+        try {
+            $this->provisioner->provision($client->database_name, $client->slug);
+
+            // Mark as active after successful provisioning
+            $client->update(['status' => 'active']);
+            AuditLog::log('provisioned', 'Client', $client->id, ['status' => 'pending'], ['status' => 'active', 'database' => $client->database_name]);
+
+            return redirect()->route('clients.index')
+                ->with('success', '✅ Client "'.$client->name.'" created and database provisioned successfully! (DB: '.$client->database_name.')');
+
+        } catch (\Throwable $e) {
+            Log::error('Client provisioning failed', [
+                'client_id' => $client->id,
+                'database' => $client->database_name,
+                'error' => $e->getMessage(),
+            ]);
+
+            return redirect()->route('clients.index')
+                ->with('warning', '⚠️ Client "'.$client->name.'" created but database provisioning failed: '.$e->getMessage().'. Status set to pending — retry from client details page.');
+        }
+    }
+
+    public function show(Client $client)
+    {
+        $dbExists = $this->provisioner->databaseExists($client->database_name);
+
+        return view('clients.show', compact('client', 'dbExists'));
     }
 
     public function edit(Client $client)
@@ -55,8 +93,8 @@ class ClientController extends Controller
     {
         $validated = $request->validate([
             'name' => 'required|string|max:255',
-            'username' => 'required|string|max:255|unique:clients,username,' . $client->id,
-            'admin_email' => 'required|email|unique:clients,admin_email,' . $client->id,
+            'username' => 'required|string|max:255|unique:clients,username,'.$client->id,
+            'admin_email' => 'required|email|unique:clients,admin_email,'.$client->id,
             'phone' => 'nullable|string|max:20',
             'address' => 'nullable|string|max:500',
             'shop_number' => 'nullable|string|max:50',
@@ -68,74 +106,61 @@ class ClientController extends Controller
 
         $oldValues = $client->toArray();
         $client->update($validated);
-
         AuditLog::log('updated', 'Client', $client->id, $oldValues, $client->fresh()->toArray());
 
         return redirect()->route('clients.index')->with('success', 'Client updated successfully!');
     }
 
+    public function reprovision(Client $client)
+    {
+        // Manual re-provision button (from show page, if DB missing)
+        try {
+            if ($this->provisioner->databaseExists($client->database_name)) {
+                return back()->with('info', 'Database already exists: '.$client->database_name);
+            }
+            $this->provisioner->provision($client->database_name, $client->slug);
+            $client->update(['status' => 'active']);
+            AuditLog::log('reprovisioned', 'Client', $client->id, null, ['database' => $client->database_name]);
+
+            return back()->with('success', '✅ Database re-provisioned successfully!');
+        } catch (\Throwable $e) {
+            return back()->with('error', 'Re-provisioning failed: '.$e->getMessage());
+        }
+    }
+
     public function destroy(Client $client)
     {
         AuditLog::log('deleted', 'Client', $client->id, $client->toArray(), null);
+
+        // Note: We do NOT auto-drop the DB on delete for safety.
+        // Admin must manually drop if needed. This prevents accidental data loss.
+
         $client->delete();
-        return back()->with('success', 'Client deleted.')->with('deleted_client_id', $client->id);
+
+        return back()->with('success', 'Client deleted. Note: Database "'.$client->database_name.'" was NOT dropped — delete it manually from phpMyAdmin if needed.');
     }
 
-    public function restore($id)
+    public function bulkAction(Request $request)
     {
-        $client = Client::withTrashed()->find($id);
-        if ($client) {
-            $client->restore();
-            AuditLog::log('restored', 'Client', $client->id, null, $client->toArray());
-            return back()->with('success', 'Client restored successfully!');
-        }
-        return back()->with('error', 'Client not found.');
-    }
-
-        public function bulkAction(Request $request)
-    {
-        // If accessed via GET (e.g., typed in browser), redirect back with a message
-        if ($request->isMethod('get')) {
-            return redirect()->route('clients.index')->with('error', 'Bulk action requires a POST request. Please use the form on the Clients page.');
-        }
-
         $request->validate([
             'action' => 'required|in:activate,suspend,delete',
-            'client_ids' => 'required|array|min:1',
+            'selected' => 'required|array|min:1',
         ]);
 
-        $clientIds = $request->input('client_ids');
-        $action = $request->input('action');
-        
-        \Illuminate\Support\Facades\DB::beginTransaction();
-        try {
-            $clients = \App\Models\Client::whereIn('id', $clientIds)->get();
-            
-            if ($action === 'activate') {
-                \App\Models\Client::whereIn('id', $clientIds)->update(['status' => 'active']);
-            } elseif ($action === 'suspend') {
-                \App\Models\Client::whereIn('id', $clientIds)->update(['status' => 'suspended']);
-            } elseif ($action === 'delete') {
-                foreach ($clients as $client) {
-                    \App\Models\AuditLog::log('deleted', 'Client', $client->id, $client->toArray(), null);
-                }
-                \App\Models\Client::whereIn('id', $clientIds)->delete();
-            }
-            
-            \Illuminate\Support\Facades\DB::commit();
-            return redirect()->route('clients.index')->with('success', 'Bulk action completed successfully!');
-        } catch (\Exception $e) {
-            \Illuminate\Support\Facades\DB::rollBack();
-            return redirect()->route('clients.index')->with('error', 'Bulk action failed: ' . $e->getMessage());
-        }
-    }
+        $clients = Client::whereIn('id', $request->selected)->get();
 
-    public function changePassword(Request $request, Client $client)
-    {
-        $request->validate(['new_password' => 'required|min:6|confirmed']);
-        $client->admin_password = $request->new_password;
-        $client->save();
-        AuditLog::log('password_changed', 'Client', $client->id, null, ['email' => $client->admin_email]);
-        return back()->with('success', 'Password changed successfully!');
+        foreach ($clients as $client) {
+            if ($request->action === 'delete') {
+                AuditLog::log('bulk_deleted', 'Client', $client->id, $client->toArray(), null);
+                $client->delete();
+            } else {
+                $newStatus = $request->action === 'activate' ? 'active' : 'suspended';
+                $old = ['status' => $client->status];
+                $client->update(['status' => $newStatus]);
+                AuditLog::log('bulk_status_change', 'Client', $client->id, $old, ['status' => $newStatus]);
+            }
+        }
+
+        return back()->with('success', ucfirst($request->action).'d '.count($clients).' client(s).');
     }
 }

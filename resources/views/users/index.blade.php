@@ -35,6 +35,7 @@
     <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 flex-grow w-full">
         @if(session('success'))<div class="bg-green-500/20 border border-green-500/40 text-green-300 p-4 rounded-xl mb-6">{{ session('success') }}</div>@endif
         @if(session('error'))<div class="bg-red-500/20 border border-red-500/40 text-red-300 p-4 rounded-xl mb-6">{{ session('error') }}</div>@endif
+        @if($errors->any())<div class="bg-red-500/20 border border-red-500/40 text-red-300 p-4 rounded-xl mb-6">{{ $errors->first() }}</div>@endif
 
         <div class="flex justify-between items-center mb-8">
             <h2 class="text-3xl font-bold">User Management</h2>

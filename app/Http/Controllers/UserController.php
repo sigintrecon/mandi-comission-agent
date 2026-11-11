@@ -2,17 +2,18 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\User;
 use App\Models\AuditLog;
+use App\Models\User;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 
 class UserController extends Controller
 {
     public function index()
     {
         $users = User::orderBy('id', 'desc')->get();
+
         return view('users.index', compact('users'));
     }
 
@@ -46,21 +47,22 @@ class UserController extends Controller
 
     public function edit(User $user)
     {
-        if (!auth()->user()->canDeleteUser($user) && $user->id !== auth()->id()) {
+        if (! auth()->user()->canDeleteUser($user) && $user->id !== auth()->id()) {
             abort(403, 'Cannot edit this user.');
         }
+
         return view('users.edit', compact('user'));
     }
 
     public function update(Request $request, User $user)
     {
-        if (!auth()->user()->canDeleteUser($user) && $user->id !== auth()->id()) {
+        if (! auth()->user()->canDeleteUser($user) && $user->id !== auth()->id()) {
             abort(403, 'Cannot update this user.');
         }
 
         $validated = $request->validate([
             'name' => 'required|string|max:255',
-            'email' => 'required|email|unique:users,email,' . $user->id,
+            'email' => 'required|email|unique:users,email,'.$user->id,
             'password' => 'nullable|min:6',
             'role' => 'required|in:admin,client_manager,viewer',
             'is_active' => 'boolean',
@@ -75,7 +77,7 @@ class UserController extends Controller
             'is_active' => $validated['is_active'] ?? true,
         ];
 
-        if (!empty($validated['password'])) {
+        if (! empty($validated['password'])) {
             $data['password'] = Hash::make($validated['password']);
         }
 
@@ -88,7 +90,7 @@ class UserController extends Controller
 
     public function destroy(User $user)
     {
-        if (!auth()->user()->canDeleteUser($user)) {
+        if (! auth()->user()->canDeleteUser($user)) {
             return back()->with('error', 'You cannot delete this user.');
         }
 
@@ -100,57 +102,54 @@ class UserController extends Controller
 
     public function bulkAction(Request $request)
     {
-        $request->validate([
-            'action' => 'required|in:activate,deactivate,delete',
-            'user_ids' => 'required|array|min:1',
+        $validated = $request->validate([
+            'action' => ['required', 'in:activate,deactivate,delete'],
+            'user_ids' => ['required', 'array', 'min:1'],
+            'user_ids.*' => ['required', 'integer', 'distinct', 'exists:users,id'],
         ]);
 
-        $userIds = $request->input('user_ids');
-        $action = $request->input('action');
-        $count = count($userIds);
+        $users = User::whereIn('id', $validated['user_ids'])->get();
 
-        // Prevent actions on Super Admin (ID 1)
-        if (in_array(1, $userIds)) {
-            return back()->with('error', 'Cannot perform bulk action on Super Admin (ID 1).');
+        foreach ($users as $user) {
+            if (! $request->user()->canDeleteUser($user)) {
+                return back()->with('error', "You cannot perform bulk actions on {$user->name}.");
+            }
         }
 
-        DB::beginTransaction();
         try {
-            $users = User::whereIn('id', $userIds)->get();
+            DB::transaction(function () use ($users, $validated): void {
+                foreach ($users as $user) {
+                    switch ($validated['action']) {
+                        case 'activate':
+                            $oldValues = ['is_active' => $user->is_active];
+                            $user->update(['is_active' => true]);
+                            AuditLog::log('activated', 'User', $user->id, $oldValues, ['is_active' => true]);
+                            break;
 
-            switch ($action) {
-                case 'activate':
-                    User::whereIn('id', $userIds)->update(['is_active' => true]);
-                    foreach ($users as $user) {
-                        AuditLog::log('activated', 'User', $user->id, ['is_active' => false], ['is_active' => true]);
-                    }
-                    $message = "$count user(s) activated successfully!";
-                    break;
+                        case 'deactivate':
+                            $oldValues = ['is_active' => $user->is_active];
+                            $user->update(['is_active' => false]);
+                            AuditLog::log('deactivated', 'User', $user->id, $oldValues, ['is_active' => false]);
+                            break;
 
-                case 'deactivate':
-                    User::whereIn('id', $userIds)->update(['is_active' => false]);
-                    foreach ($users as $user) {
-                        AuditLog::log('deactivated', 'User', $user->id, ['is_active' => true], ['is_active' => false]);
-                    }
-                    $message = "$count user(s) deactivated successfully!";
-                    break;
-
-                case 'delete':
-                    foreach ($users as $user) {
-                        if (auth()->user()->canDeleteUser($user)) {
+                        case 'delete':
                             AuditLog::log('deleted', 'User', $user->id, $user->toArray(), null);
                             $user->delete();
-                        }
+                            break;
                     }
-                    $message = "Selected users deleted successfully!";
-                    break;
-            }
+                }
+            });
 
-            DB::commit();
+            $count = $users->count();
+            $message = match ($validated['action']) {
+                'activate' => "$count user(s) activated successfully!",
+                'deactivate' => "$count user(s) deactivated successfully!",
+                'delete' => "$count user(s) deleted successfully!",
+            };
+
             return back()->with('success', $message);
         } catch (\Exception $e) {
-            DB::rollBack();
-            return back()->with('error', 'Bulk action failed: ' . $e->getMessage());
+            return back()->with('error', 'Bulk action failed: '.$e->getMessage());
         }
     }
 
