@@ -12,35 +12,36 @@ class Client extends Model
     use SoftDeletes;
 
     protected $fillable = [
-        'name', 'username', 'slug', 'database_name', 'admin_email', 'admin_password', 
+        'name', 'username', 'slug', 'database_name', 'admin_email', 'admin_password',
         'phone', 'address', 'shop_number', 'city', 'proprietor_name',
-        'status', 'subscription_ends_at', 'last_login_at'
+        'status', 'subscription_ends_at', 'ai_api_key', 'last_login_at',
     ];
 
-    protected $hidden = ['admin_password'];
+    protected $hidden = ['admin_password', 'ai_api_key'];
 
     protected $casts = [
         'subscription_ends_at' => 'date',
         'last_login_at' => 'datetime',
+        'ai_api_key' => 'encrypted',
     ];
 
     protected static function boot()
     {
         parent::boot();
-        
+
         static::creating(function ($client) {
             if (empty($client->slug)) {
                 $baseSlug = Str::limit(Str::slug($client->name, '-'), 30, '');
                 $slug = $baseSlug;
                 $counter = 1;
                 while (static::withTrashed()->where('slug', $slug)->exists()) {
-                    $slug = $baseSlug . '-' . $counter;
+                    $slug = $baseSlug.'-'.$counter;
                     $counter++;
                 }
                 $client->slug = $slug;
             }
             if (empty($client->database_name)) {
-                $client->database_name = 'mandi_client_' . $client->slug;
+                $client->database_name = 'mandi_client_'.$client->slug;
             }
             // DO NOT hash here - let the mutator handle it
         });
@@ -49,7 +50,7 @@ class Client extends Model
     // Mutator - ALWAYS hash the password when set
     public function setAdminPasswordAttribute($value)
     {
-        if (!empty($value)) {
+        if (! empty($value)) {
             // Check if already hashed to avoid double-hashing
             if (strlen($value) === 60 && str_starts_with($value, '$2y$')) {
                 $this->attributes['admin_password'] = $value;

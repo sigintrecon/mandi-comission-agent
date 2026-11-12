@@ -1,10 +1,12 @@
 <?php
 
 use App\Http\Controllers\AuditLogController;
+use App\Http\Controllers\Client\AccountController;
 use App\Http\Controllers\ClientController;
 use App\Http\Controllers\ClientPortalController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\UserController;
+use App\Http\Middleware\AuthenticateClientPortal;
 use App\Http\Middleware\CheckRole;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -80,5 +82,77 @@ Route::middleware('auth')->group(function () {
 // Client Portal Routes (MUST BE AT THE VERY END)
 Route::get('/{slug}', [ClientPortalController::class, 'showLogin'])->name('client.portal.login');
 Route::post('/{slug}/login', [ClientPortalController::class, 'authenticate']);
-Route::get('/{slug}/dashboard', [ClientPortalController::class, 'dashboard'])->name('client.portal.dashboard');
-Route::post('/{slug}/logout', [ClientPortalController::class, 'logout']);
+Route::prefix('{slug}')
+    ->middleware(AuthenticateClientPortal::class)
+    ->name('client.portal.')
+    ->group(function () {
+        Route::get('/dashboard', [ClientPortalController::class, 'dashboard'])->name('dashboard');
+        Route::post('/logout', [ClientPortalController::class, 'logout'])->name('logout');
+
+        Route::get('/accounts', [AccountController::class, 'index'])->name('accounts.index');
+        Route::get('/accounts/create', [AccountController::class, 'create'])->name('accounts.create');
+        Route::get('/accounts/lookup', [AccountController::class, 'lookup'])->name('accounts.lookup');
+        Route::post('/accounts', [AccountController::class, 'store'])->name('accounts.store');
+        Route::delete('/accounts/{account}', [AccountController::class, 'destroy'])
+            ->whereNumber('account')->name('accounts.destroy');
+
+        Route::get('/items/create', [ClientPortalController::class, 'page'])
+            ->defaults('page', 'items.create')->name('items.create');
+        Route::post('/items', [ClientPortalController::class, 'storeItem'])->name('items.store');
+
+        Route::get('/bills', [ClientPortalController::class, 'page'])
+            ->defaults('page', 'bills.index')->name('bills.index');
+        Route::get('/bills/sale', [ClientPortalController::class, 'page'])
+            ->defaults('page', 'bills.sale')->name('bills.sale');
+        Route::post('/bills/sale', [ClientPortalController::class, 'storeBill'])
+            ->defaults('billType', 1)->name('bills.sale.store');
+        Route::get('/bills/khareed', [ClientPortalController::class, 'page'])
+            ->defaults('page', 'bills.khareed')->name('bills.khareed');
+        Route::post('/bills/khareed', [ClientPortalController::class, 'storeBill'])
+            ->defaults('billType', 2)->name('bills.khareed.store');
+        Route::get('/bills/customer', [ClientPortalController::class, 'page'])
+            ->defaults('page', 'bills.customer')->name('bills.customer');
+        Route::post('/bills/customer', [ClientPortalController::class, 'storeBill'])
+            ->defaults('billType', 3)->name('bills.customer.store');
+
+        Route::get('/vouchers/debit', [ClientPortalController::class, 'page'])
+            ->defaults('page', 'vouchers.debit')->name('vouchers.debit');
+        Route::post('/vouchers/debit', [ClientPortalController::class, 'storeVoucher'])
+            ->defaults('voucherType', 'debit')->name('vouchers.debit.store');
+        Route::get('/vouchers/credit', [ClientPortalController::class, 'page'])
+            ->defaults('page', 'vouchers.credit')->name('vouchers.credit');
+        Route::post('/vouchers/credit', [ClientPortalController::class, 'storeVoucher'])
+            ->defaults('voucherType', 'credit')->name('vouchers.credit.store');
+        Route::get('/vouchers/agrai', [ClientPortalController::class, 'page'])
+            ->defaults('page', 'vouchers.agrai')->name('vouchers.agrai');
+        Route::post('/vouchers/agrai', [ClientPortalController::class, 'storeVoucher'])
+            ->defaults('voucherType', 'agrai')->name('vouchers.agrai.store');
+        Route::get('/vouchers/jv', [ClientPortalController::class, 'page'])
+            ->defaults('page', 'vouchers.jv')->name('vouchers.jv');
+        Route::post('/vouchers/jv', [ClientPortalController::class, 'storeVoucher'])
+            ->defaults('voucherType', 'jv')->name('vouchers.jv.store');
+
+        Route::get('/ledger/party', [ClientPortalController::class, 'page'])
+            ->defaults('page', 'ledger.party')->name('ledger.party');
+        Route::get('/ledger/banam', [ClientPortalController::class, 'page'])
+            ->defaults('page', 'ledger.banam')->name('ledger.banam');
+        Route::get('/stock/ledger', [ClientPortalController::class, 'page'])
+            ->defaults('page', 'stock.ledger')->name('stock.ledger');
+
+        Route::get('/reports/dailybook', [ClientPortalController::class, 'page'])
+            ->defaults('page', 'reports.dailybook')->name('reports.dailybook');
+        Route::get('/reports/cash', [ClientPortalController::class, 'page'])
+            ->defaults('page', 'reports.cash')->name('reports.cash');
+        Route::get('/reports/balance', [ClientPortalController::class, 'page'])
+            ->defaults('page', 'reports.balance')->name('reports.balance');
+        Route::get('/reports/agrai', [ClientPortalController::class, 'page'])
+            ->defaults('page', 'reports.agrai')->name('reports.agrai');
+
+        Route::get('/settings', [ClientPortalController::class, 'page'])
+            ->defaults('page', 'settings')->name('settings');
+        Route::post('/settings', [ClientPortalController::class, 'updateSettings'])->name('settings.update');
+        Route::get('/ai-settings', [ClientPortalController::class, 'page'])
+            ->defaults('page', 'ai-settings')->name('ai-settings');
+        Route::post('/ai-settings', [ClientPortalController::class, 'updateAiSettings'])->name('ai-settings.update');
+        Route::post('/ai-chat', [ClientPortalController::class, 'chat'])->name('ai-chat');
+    });
