@@ -101,6 +101,167 @@ class ClientPortalRoutesTest extends TestCase
             ->assertDontSee('OLD-SEARCH-123');
     }
 
+    public function test_new_sale_bill_redirects_to_the_next_invoice_number(): void
+    {
+        $this->tenantDatabasePath = tempnam(sys_get_temp_dir(), 'mandi-tenant-');
+        $client = $this->createActiveClient(['database_name' => $this->tenantDatabasePath]);
+        $this->createTenantSaleBillSearchTables($client);
+        DB::connection('client_portal')->table('account_types')->insert([
+            ['id' => 1, 'name_en' => 'Customer'],
+            ['id' => 2, 'name_en' => 'Party'],
+        ]);
+        DB::connection('client_portal')->table('accounts')->insert([
+            ['id' => 1, 'code' => 'C-1', 'account_type_id' => 1, 'is_active' => true, 'name_ur' => 'کسٹمر'],
+            ['id' => 2, 'code' => 'P-1', 'account_type_id' => 2, 'is_active' => true, 'name_ur' => 'بیوپاری'],
+        ]);
+        DB::connection('client_portal')->table('items')->insert([
+            ['id' => 1, 'code' => 'I-1', 'name_ur' => 'جنس'],
+        ]);
+        DB::connection('client_portal')->table('doc_sequences')->insert([
+            'doc_type' => 'bill:sale_maal',
+            'prefix' => '',
+            'current_number' => 1,
+        ]);
+        $session = [
+            'client_portal_auth' => [
+                'client_id' => $client->id,
+                'slug' => $client->slug,
+            ],
+        ];
+
+        $response = $this->withSession($session)
+            ->post(route('client.portal.bills.sale.store', ['slug' => $client->slug]), [
+                'inv_no' => '1',
+                'bill_date' => '2026-01-03',
+                'party_account_id' => 2,
+                'item_id' => 1,
+                'status' => 'posted',
+                'lines' => [[
+                    'line_date' => '2026-01-03',
+                    'customer_account_id' => 1,
+                    'item_id' => 1,
+                    'nag' => 2,
+                    'wazan' => '',
+                    'rate' => 100,
+                    'lagana' => 4,
+                    'trader_rate' => '',
+                ]],
+            ]);
+
+        $response->assertRedirect(route('client.portal.bills.sale', ['slug' => $client->slug]));
+        $this->assertDatabaseHas('bills', ['inv_no' => '1'], 'client_portal');
+        $this->assertDatabaseHas('bill_lines', [
+            'nag' => 2,
+            'lagana_amount' => 8,
+            'cust_amount' => 208,
+        ], 'client_portal');
+        $this->assertSame(2, DB::connection('client_portal')->table('doc_sequences')
+            ->where('doc_type', 'bill:sale_maal')->value('current_number'));
+
+        $this->withSession($session)
+            ->get(route('client.portal.bills.sale', ['slug' => $client->slug]))
+            ->assertOk()
+            ->assertSee('name="inv_no" id="inv_no" value="2"', false);
+    }
+
+    public function test_bill_reports_filter_and_paginate_tenant_sale_data(): void
+    {
+        $this->tenantDatabasePath = tempnam(sys_get_temp_dir(), 'mandi-tenant-');
+        $client = $this->createActiveClient(['database_name' => $this->tenantDatabasePath]);
+        $this->createTenantSaleBillSearchTables($client);
+        DB::connection('client_portal')->table('account_types')->insert([
+            ['id' => 1, 'name_en' => 'Customer'],
+            ['id' => 2, 'name_en' => 'Party'],
+        ]);
+        DB::connection('client_portal')->table('accounts')->insert([
+            ['id' => 1, 'code' => 'C-1', 'account_type_id' => 1, 'is_active' => true, 'name_ur' => 'کسٹمر'],
+            ['id' => 2, 'code' => 'P-1', 'account_type_id' => 2, 'is_active' => true, 'name_ur' => 'بیوپاری'],
+        ]);
+        DB::connection('client_portal')->table('items')->insert([
+            ['id' => 1, 'code' => 'I-1', 'name_ur' => 'سیب'],
+        ]);
+        foreach (range(1, 11) as $number) {
+            $billId = DB::connection('client_portal')->table('bills')->insertGetId([
+                'inv_no' => 'SALE-'.$number,
+                'bill_type' => 1,
+                'bill_date' => '2026-01-01',
+                'party_account_id' => 2,
+                'item_id' => 1,
+                'status' => 'posted',
+                'lot_nag' => 2,
+            ]);
+            DB::connection('client_portal')->table('bill_lines')->insert([
+                'bill_id' => $billId,
+                'customer_account_id' => 1,
+                'item_id' => 1,
+                'line_date' => '2026-01-01',
+                'nag' => 2,
+                'rate' => 100,
+                'lagana' => 3,
+                'lagana_amount' => 6,
+                'cust_amount' => 206,
+                'party_amount' => 200,
+                'diff_amount' => 0,
+                'sort_order' => 0,
+            ]);
+        }
+        DB::connection('client_portal')->table('bills')->insert([
+            'inv_no' => 'PUR-1',
+            'bill_type' => 2,
+            'bill_date' => '2026-01-01',
+            'party_account_id' => 2,
+            'item_id' => 1,
+            'status' => 'posted',
+            'lot_nag' => 1,
+        ]);
+        $session = [
+            'client_portal_auth' => [
+                'client_id' => $client->id,
+                'slug' => $client->slug,
+            ],
+        ];
+
+        $this->withSession($session)
+            ->get(route('client.portal.bills.sale.all', ['slug' => $client->slug]))
+            ->assertOk()
+            ->assertSee('<h1>تمام سیل بل</h1>', false)
+            ->assertViewHas('bills', fn ($bills) => $bills->total() === 11 && $bills->count() === 10);
+
+        $this->withSession($session)
+            ->get(route('client.portal.bills.all', ['slug' => $client->slug]))
+            ->assertOk()
+            ->assertSee('PUR-1')
+            ->assertViewHas('bills', fn ($bills) => $bills->total() === 12 && $bills->count() === 10);
+
+        $this->withSession($session)
+            ->get(route('client.portal.bills.sale.customers', ['slug' => $client->slug]))
+            ->assertOk()
+            ->assertSee('<h1>تمام کسٹمر وضاحت</h1>', false)
+            ->assertViewHas('lines', fn ($lines) => $lines->total() === 11 && $lines->count() === 10);
+
+        $filters = [
+            'from' => '2026-01-01',
+            'to' => '2026-01-01',
+            'customer_id' => 1,
+            'item_id' => 1,
+            'invoice' => 'SALE-11',
+            'per_page' => 25,
+        ];
+        $this->withSession($session)
+            ->get(route('client.portal.bills.sale.all', ['slug' => $client->slug, ...$filters]))
+            ->assertOk()
+            ->assertSee('SALE-11')
+            ->assertDontSee('SALE-10')
+            ->assertViewHas('bills', fn ($bills) => $bills->total() === 1 && $bills->count() === 1);
+
+        $this->withSession($session)
+            ->get(route('client.portal.bills.sale.customers', ['slug' => $client->slug, ...$filters]))
+            ->assertOk()
+            ->assertSee('SALE-11')
+            ->assertSee('کسٹمر')
+            ->assertViewHas('lines', fn ($lines) => $lines->total() === 1 && $lines->count() === 1);
+    }
+
     public function test_sale_invoice_can_be_loaded_and_updated_from_the_bill_list(): void
     {
         $this->tenantDatabasePath = tempnam(sys_get_temp_dir(), 'mandi-tenant-');
@@ -176,6 +337,7 @@ class ClientPortalRoutesTest extends TestCase
             ]))
             ->assertOk()
             ->assertSee('name="bill_id" id="bill_id" value="'.$billId.'"', false)
+            ->assertSee('id="t_lagana" value="0" readonly', false)
             ->assertSee('پرانا جنس')
             ->assertSee('EDIT-100');
 
@@ -229,6 +391,8 @@ class ClientPortalRoutesTest extends TestCase
             'nag' => 3,
             'rate' => 150,
             'lagana' => 5,
+            'lagana_amount' => 15,
+            'cust_amount' => 465,
         ], 'client_portal');
         $this->assertDatabaseHas('bill_charges', [
             'bill_id' => $billId,

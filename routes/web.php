@@ -105,6 +105,10 @@ Route::prefix('{slug}')
         Route::get('/bills', [ClientPortalController::class, 'page'])
             ->defaults('page', 'bills.index')->name('bills.index');
         Route::get('/bills/sale', [BillController::class, 'create'])->name('bills.sale');
+        Route::get('/bills/sale/all', [BillController::class, 'allSaleBills'])->name('bills.sale.all');
+        Route::get('/bills/sale/customers', [BillController::class, 'customerExplanation'])
+            ->name('bills.sale.customers');
+        Route::get('/bills/all', [BillController::class, 'allBills'])->name('bills.all');
         Route::post('/bills/sale', [BillController::class, 'store'])->name('bills.sale.store');
         Route::get('/bills/khareed', [ClientPortalController::class, 'page'])
             ->defaults('page', 'bills.khareed')->name('bills.khareed');

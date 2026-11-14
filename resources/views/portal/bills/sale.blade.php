@@ -93,9 +93,9 @@ body{font-family:'Noto Nastaliq Urdu',serif;background:#b8daff;height:100vh;disp
 .bill-list-toolbar label{font-size:13px;white-space:nowrap}
 .bill-list-toolbar input{vertical-align:middle}
 .bill-list-actions{display:flex;gap:3px;flex-wrap:wrap}
-.bill-list-actions button{border:0;border-radius:3px;background:#0d6efd;color:#fff;padding:5px 10px;font-family:inherit;font-size:13px;font-weight:700;cursor:pointer}
-.bill-list-actions button:hover,.bill-list-actions button.active{background:#084298}
-.bill-list-actions button:first-child{background:#28a745}
+.bill-list-actions button,.bill-list-actions a{border:0;border-radius:3px;background:#0d6efd;color:#fff;padding:5px 10px;font-family:inherit;font-size:13px;font-weight:700;cursor:pointer;text-decoration:none}
+.bill-list-actions button:hover,.bill-list-actions button.active,.bill-list-actions a:hover{background:#084298}
+.bill-list-actions a:first-child{background:#28a745}
 .bills-tbl-wrap{background:transparent;border:0;border-radius:0;overflow:auto}
 table{width:100%;border-collapse:collapse;white-space:nowrap}
 thead{position:sticky;top:0;z-index:5}
@@ -336,7 +336,7 @@ tr:hover td{background:#138496}
             <div class="tot-row"><label>خام رقم</label><input type="text" id="t_gross" readonly></div>
             <div class="tot-row"><label>کل خرچہ</label><input type="text" id="t_exp" readonly></div>
             <div class="tot-row"><label>صافی رقم</label><input type="text" id="t_safi" readonly></div>
-            <div class="tot-row"><label>لگانا</label><input type="text" id="t_lagana" readonly></div>
+            <div class="tot-row"><label>لگانا</label><input type="text" id="t_lagana" value="0" readonly></div>
             <div class="tot-row"><label>ڈیفرنس</label><input type="text" id="t_diff" readonly></div>
             <div class="tot-row"><label>اوسط</label><input type="text" id="t_avg" readonly></div>
           </div>
@@ -356,9 +356,11 @@ tr:hover td{background:#138496}
     <div class="bill-list-toolbar">
       <label><input type="checkbox" id="selectAllBills"> تمام بل منتخب کریں</label>
       <div class="bill-list-actions" role="group" aria-label="بل فلٹر">
-        <button type="button" class="active" data-bill-filter="all" aria-pressed="true">تمام سیل بل</button>
+        <a href="{{ route('client.portal.bills.sale.all', $client->slug) }}">تمام سیل بل</a>
         <button type="button" data-bill-filter="posted" aria-pressed="false">مکمل سیل بل</button>
         <button type="button" data-bill-filter="pending" aria-pressed="false">نامکمل بیجک</button>
+        <a href="{{ route('client.portal.bills.sale.customers', $client->slug) }}">تمام کسٹمر وضاحت</a>
+        <a href="{{ route('client.portal.bills.all', $client->slug) }}">تمام بل</a>
       </div>
     </div>
 
@@ -444,6 +446,21 @@ function escapeHtml(value){
 
 function getEnteredNag(){
     return lines.reduce((total, line) => total + (Number(line.nag) || 0), 0);
+}
+
+function recalculateLineAmounts(){
+    lines.forEach((line, index) => {
+        const laganaAmount = (Number(line.nag) || 0) * (Number(line.lag) || 0);
+        const rateAmount = (Number(line.wazan) || 0) > 0
+            ? Number(line.wazan) * Number(line.rate)
+            : Number(line.nag) * Number(line.rate);
+        line.amt = Math.round(rateAmount + laganaAmount);
+
+        const amountInput = document.querySelectorAll('.line-row')[index]?.querySelector('.lr-amt');
+        if(amountInput){
+            amountInput.value = line.amt;
+        }
+    });
 }
 
 function getLotNagLimit(){
@@ -601,6 +618,7 @@ document.getElementById('btnAddLine').addEventListener('click', function(){
         t2rate,
         amt: Math.round(amt),
     });
+    recalculateLineAmounts();
     if(item) document.getElementById('item_id').value = item.id;
 
     renderLines();
@@ -691,14 +709,6 @@ function updateLineField(i, field, value){
         ln[field] = value;
     }
 
-    if(['nag', 'wazan', 'rate', 'lag'].includes(field)){
-        const amount = ln.wazan > 0
-            ? ln.wazan * ln.rate + ln.nag * ln.lag
-            : ln.nag * (ln.rate + ln.lag);
-        ln.amt = Math.round(amount);
-        document.querySelectorAll('.line-row')[i].querySelector('.lr-amt').value = ln.amt;
-    }
-
     const row = document.querySelectorAll('.line-row')[i];
     if(field === 'customer'){
         row.querySelector('.lr-cname').value = ln.curname;
@@ -719,6 +729,7 @@ function updateLineField(i, field, value){
         row.querySelector(`[data-line-field="${name}"]`).value = fieldValue;
     });
 
+    recalculateLineAmounts();
     updateTotals();
 }
 
@@ -758,7 +769,7 @@ function updateTotals(){
 
     document.getElementById('t_nag').value    = totalNag;
     document.getElementById('t_gross').value  = Math.round(totalGross);
-    document.getElementById('t_lagana').value = Math.round(totalLagana);
+    document.getElementById('t_lagana').value = Number(totalLagana.toFixed(2));
     document.getElementById('t_diff').value   = Math.round(totalDiff);
     document.getElementById('t_avg').value    = totalNag > 0 ? (totalGross / totalNag).toFixed(1) : '0.0';
 
@@ -907,11 +918,12 @@ if(EDITABLE_BILL){
         itemId: line.item_id || '',
         itemCode: line.item_code || '',
         lag: Number(line.lagana) || 0,
+        laganaAmount: (Number(line.nag) || 0) * (Number(line.lagana) || 0),
         t2rate: Number(line.trader_rate) || 0,
         amt: Math.round((Number(line.wazan) > 0
             ? Number(line.wazan) * Number(line.rate)
             : Number(line.nag) * Number(line.rate))
-            + Number(line.nag) * Number(line.lagana)),
+            + (Number(line.nag) || 0) * (Number(line.lagana) || 0)),
     }));
     lineCount = lines.length;
     renderLines();

@@ -129,7 +129,7 @@ class BillController extends Controller
                     'lines.line_date', 'lines.customer_account_id', 'customers.code as customer_code',
                     'customers.name_ur as customer_name', 'lines.item_id', 'items.code as item_code',
                     'items.name_ur as item_name', 'lines.nag', 'lines.wazan', 'lines.rate',
-                    'lines.lagana', 'lines.trader_rate',
+                    'lines.lagana', 'lines.lagana_amount', 'lines.trader_rate',
                 ]);
             $editableBill->charges = $db->table('bill_charges')
                 ->join('charge_heads', 'charge_heads.id', '=', 'bill_charges.charge_head_id')
@@ -148,6 +148,152 @@ class BillController extends Controller
         return view('portal.bills.sale', compact(
             'client', 'nextInv', 'parties', 'customers',
             'marfatList', 'items', 'chargeHeads', 'recentBills', 'markaList', 'billSearch', 'editableBill'
+        ));
+    }
+
+    public function allBills(Request $request): View
+    {
+        return $this->billReport($request, false);
+    }
+
+    public function allSaleBills(Request $request): View
+    {
+        return $this->billReport($request, true);
+    }
+
+    private function billReport(Request $request, bool $saleOnly): View
+    {
+        $client = $request->attributes->get('clientPortalClient');
+        abort_unless($client instanceof Client, 404);
+
+        $filters = $this->validatedReportFilters($request);
+        $db = $this->databases->connection($client);
+
+        $bills = $db->table('bills as bills')
+            ->leftJoin('accounts as parties', 'parties.id', '=', 'bills.party_account_id')
+            ->leftJoin('accounts as marfat', 'marfat.id', '=', 'bills.marfat_account_id')
+            ->when($saleOnly, fn ($query) => $query->where('bills.bill_type', 1))
+            ->when($filters['from'] !== '', fn ($query) => $query->whereDate('bills.bill_date', '>=', $filters['from']))
+            ->when($filters['to'] !== '', fn ($query) => $query->whereDate('bills.bill_date', '<=', $filters['to']))
+            ->when($filters['invoice'] !== '', fn ($query) => $query->where('bills.inv_no', 'like', '%'.$filters['invoice'].'%'))
+            ->when($filters['status'] !== '', fn ($query) => $query->where('bills.status', $filters['status']))
+            ->when($filters['customer_id'] !== '', function ($query) use ($filters): void {
+                $query->whereExists(function ($lineQuery) use ($filters): void {
+                    $lineQuery->selectRaw('1')
+                        ->from('bill_lines as filter_lines')
+                        ->whereColumn('filter_lines.bill_id', 'bills.id')
+                        ->where('filter_lines.customer_account_id', $filters['customer_id']);
+                });
+            })
+            ->when($filters['item_id'] !== '', function ($query) use ($filters): void {
+                $query->where(function ($itemQuery) use ($filters): void {
+                    $itemQuery->where('bills.item_id', $filters['item_id'])
+                        ->orWhereExists(function ($lineQuery) use ($filters): void {
+                            $lineQuery->selectRaw('1')
+                                ->from('bill_lines as filter_lines')
+                                ->whereColumn('filter_lines.bill_id', 'bills.id')
+                                ->where('filter_lines.item_id', $filters['item_id']);
+                        });
+                });
+            })
+            ->orderByDesc('bills.bill_date')
+            ->orderByDesc('bills.id')
+            ->select([
+                'bills.id', 'bills.inv_no', 'bills.bill_type', 'bills.bill_date',
+                'bills.party_account_id', 'bills.marfat_account_id', 'bills.item_id',
+                'bills.marka', 'bills.vehicle_no', 'bills.container_no',
+                'bills.lot_nag', 'bills.status', 'parties.name_ur as party_name',
+                'marfat.name_ur as marfat_name',
+            ])
+            ->paginate($filters['per_page'])
+            ->withQueryString();
+
+        $billIds = $bills->getCollection()->pluck('id');
+        $lineGroups = $db->table('bill_lines as lines')
+            ->leftJoin('accounts as customers', 'customers.id', '=', 'lines.customer_account_id')
+            ->leftJoin('items', 'items.id', '=', 'lines.item_id')
+            ->whereIn('lines.bill_id', $billIds)
+            ->orderBy('lines.sort_order')
+            ->get([
+                'lines.bill_id', 'customers.name_ur as customer_name', 'customers.code as customer_code',
+                'items.name_ur as item_name', 'items.code as item_code',
+                'lines.nag', 'lines.wazan', 'lines.rate', 'lines.lagana',
+                'lines.lagana_amount', 'lines.trader_rate', 'lines.cust_amount',
+                'lines.party_amount', 'lines.diff_amount',
+            ])
+            ->groupBy('bill_id');
+        $chargeGroups = $db->table('bill_charges')
+            ->join('charge_heads', 'charge_heads.id', '=', 'bill_charges.charge_head_id')
+            ->whereIn('bill_charges.bill_id', $billIds)
+            ->orderBy('charge_heads.sort_order')
+            ->get([
+                'bill_charges.bill_id', 'charge_heads.name_en',
+                'bill_charges.rate', 'bill_charges.amount',
+            ])
+            ->groupBy('bill_id');
+
+        $bills->getCollection()->each(function ($bill) use ($lineGroups, $chargeGroups): void {
+            $bill->lines = $lineGroups->get($bill->id, collect());
+            $bill->charges = $chargeGroups->get($bill->id, collect());
+        });
+
+        $customers = $db->table('accounts as accounts')
+            ->join('account_types as types', 'types.id', '=', 'accounts.account_type_id')
+            ->where('types.name_en', 'Customer')
+            ->orderBy('accounts.name_ur')
+            ->get(['accounts.id', 'accounts.name_ur', 'accounts.code']);
+        $items = $db->table('items')->orderBy('name_ur')->get(['id', 'name_ur', 'code']);
+        $reportType = $saleOnly ? 'sale' : 'bills';
+
+        return view('portal.bills.report', compact(
+            'client', 'bills', 'customers', 'items', 'filters', 'reportType'
+        ));
+    }
+
+    public function customerExplanation(Request $request): View
+    {
+        $client = $request->attributes->get('clientPortalClient');
+        abort_unless($client instanceof Client, 404);
+
+        $filters = $this->validatedReportFilters($request);
+        $db = $this->databases->connection($client);
+
+        $lines = $db->table('bill_lines as lines')
+            ->join('bills', 'bills.id', '=', 'lines.bill_id')
+            ->join('accounts as customers', 'customers.id', '=', 'lines.customer_account_id')
+            ->leftJoin('accounts as parties', 'parties.id', '=', 'bills.party_account_id')
+            ->leftJoin('items', 'items.id', '=', 'lines.item_id')
+            ->where('bills.bill_type', 1)
+            ->when($filters['from'] !== '', fn ($query) => $query->whereDate('bills.bill_date', '>=', $filters['from']))
+            ->when($filters['to'] !== '', fn ($query) => $query->whereDate('bills.bill_date', '<=', $filters['to']))
+            ->when($filters['invoice'] !== '', fn ($query) => $query->where('bills.inv_no', 'like', '%'.$filters['invoice'].'%'))
+            ->when($filters['status'] !== '', fn ($query) => $query->where('bills.status', $filters['status']))
+            ->when($filters['customer_id'] !== '', fn ($query) => $query->where('lines.customer_account_id', $filters['customer_id']))
+            ->when($filters['item_id'] !== '', fn ($query) => $query->where('lines.item_id', $filters['item_id']))
+            ->orderByDesc('bills.bill_date')
+            ->orderByDesc('bills.id')
+            ->orderBy('lines.sort_order')
+            ->select([
+                'lines.id', 'bills.inv_no', 'bills.bill_date', 'bills.status',
+                'customers.name_ur as customer_name', 'customers.code as customer_code',
+                'parties.name_ur as party_name', 'items.name_ur as item_name',
+                'lines.nag', 'lines.wazan', 'lines.rate', 'lines.lagana',
+                'lines.lagana_amount', 'lines.cust_amount', 'lines.party_amount',
+                'lines.diff_amount',
+            ])
+            ->paginate($filters['per_page'])
+            ->withQueryString();
+
+        $customers = $db->table('accounts as accounts')
+            ->join('account_types as types', 'types.id', '=', 'accounts.account_type_id')
+            ->where('types.name_en', 'Customer')
+            ->orderBy('accounts.name_ur')
+            ->get(['accounts.id', 'accounts.name_ur', 'accounts.code']);
+        $items = $db->table('items')->orderBy('name_ur')->get(['id', 'name_ur', 'code']);
+        $reportType = 'customers';
+
+        return view('portal.bills.report', compact(
+            'client', 'lines', 'customers', 'items', 'filters', 'reportType'
         ));
     }
 
@@ -206,7 +352,6 @@ class BillController extends Controller
         // ── Compute bill totals from lines ───────────────
         $totalNag = 0;
         $totalGross = 0;  // sum of party_amount (cust_amount when no trader_rate)
-        $totalLagana = 0;
         $totalDiff = 0;
 
         $processedLines = [];
@@ -238,7 +383,6 @@ class BillController extends Controller
 
             $totalNag += $nag;
             $totalGross += $partyAmount;   // بیوپاری کو دینا ہے
-            $totalLagana += $laganaAmount;
             $totalDiff += $diffAmount;
 
             $processedLines[] = [
@@ -386,11 +530,38 @@ class BillController extends Controller
                 ? 'بیجک نامکمل محفوظ ہوگیا۔'
                 : 'سیل مال بل کامیابی سے محفوظ ہوگیا۔');
 
-        return redirect()
-            ->route('client.portal.bills.sale', [
-                'slug' => $client->slug,
-                'search' => $validated['inv_no'],
-            ])
+        $redirect = redirect()->route('client.portal.bills.sale', [
+            'slug' => $client->slug,
+            ...($billToUpdate ? ['search' => $validated['inv_no']] : []),
+        ]);
+
+        return $redirect
             ->with('success', $msg);
+    }
+
+    /**
+     * @return array{from: string, to: string, customer_id: string, item_id: string, invoice: string, status: string, per_page: int}
+     */
+    private function validatedReportFilters(Request $request): array
+    {
+        $validated = $request->validate([
+            'from' => ['nullable', 'date'],
+            'to' => ['nullable', 'date'],
+            'customer_id' => ['nullable', 'integer', 'min:1'],
+            'item_id' => ['nullable', 'integer', 'min:1'],
+            'invoice' => ['nullable', 'string', 'max:50'],
+            'status' => ['nullable', 'in:pending,posted'],
+            'per_page' => ['nullable', 'in:10,25,50,100'],
+        ]);
+
+        return [
+            'from' => $validated['from'] ?? '',
+            'to' => $validated['to'] ?? '',
+            'customer_id' => (string) ($validated['customer_id'] ?? ''),
+            'item_id' => (string) ($validated['item_id'] ?? ''),
+            'invoice' => trim($validated['invoice'] ?? ''),
+            'status' => $validated['status'] ?? '',
+            'per_page' => (int) ($validated['per_page'] ?? 10),
+        ];
     }
 }
