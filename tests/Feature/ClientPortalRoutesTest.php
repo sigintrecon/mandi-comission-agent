@@ -48,6 +48,235 @@ class ClientPortalRoutesTest extends TestCase
             ->assertSee(route('client.portal.ai-settings', ['slug' => $client->slug]));
     }
 
+    public function test_sale_bill_search_finds_invoices_older_than_the_recent_list(): void
+    {
+        $this->tenantDatabasePath = tempnam(sys_get_temp_dir(), 'mandi-tenant-');
+        $client = $this->createActiveClient(['database_name' => $this->tenantDatabasePath]);
+        $this->createTenantSaleBillSearchTables($client);
+
+        DB::connection('client_portal')->table('bills')->insert([
+            'bill_type' => 1,
+            'inv_no' => 'OLD-SEARCH-123',
+            'bill_date' => '2026-01-01',
+            'status' => 'posted',
+            'lot_nag' => 1,
+        ]);
+        foreach (range(1, 50) as $number) {
+            DB::connection('client_portal')->table('bills')->insert([
+                'bill_type' => 1,
+                'inv_no' => 'RECENT-'.$number,
+                'bill_date' => '2026-01-02',
+                'status' => 'posted',
+                'lot_nag' => 1,
+            ]);
+        }
+
+        $response = $this->withSession([
+            'client_portal_auth' => [
+                'client_id' => $client->id,
+                'slug' => $client->slug,
+            ],
+        ])->get(route('client.portal.bills.sale', [
+            'slug' => $client->slug,
+            'search' => 'OLD-SEARCH-123',
+        ]));
+
+        $response->assertOk()
+            ->assertSee('value="OLD-SEARCH-123"', false)
+            ->assertSee('OLD-SEARCH-123')
+            ->assertDontSee('RECENT-50');
+
+        $this->withSession([
+            'client_portal_auth' => [
+                'client_id' => $client->id,
+                'slug' => $client->slug,
+            ],
+        ])->get(route('client.portal.bills.sale', [
+            'slug' => $client->slug,
+            'search' => 'RECENT-',
+        ]))
+            ->assertOk()
+            ->assertSee('RECENT-1')
+            ->assertSee('RECENT-50')
+            ->assertDontSee('OLD-SEARCH-123');
+    }
+
+    public function test_sale_invoice_can_be_loaded_and_updated_from_the_bill_list(): void
+    {
+        $this->tenantDatabasePath = tempnam(sys_get_temp_dir(), 'mandi-tenant-');
+        $client = $this->createActiveClient(['database_name' => $this->tenantDatabasePath]);
+        $this->createTenantSaleBillSearchTables($client);
+
+        DB::connection('client_portal')->table('account_types')->insert([
+            ['id' => 1, 'name_en' => 'Customer'],
+            ['id' => 2, 'name_en' => 'Party'],
+        ]);
+        DB::connection('client_portal')->table('accounts')->insert([
+            ['id' => 1, 'code' => 'C-1', 'account_type_id' => 1, 'name_ur' => 'پرانا گاہک'],
+            ['id' => 2, 'code' => 'P-1', 'account_type_id' => 2, 'name_ur' => 'پرانا بیوپاری'],
+        ]);
+        DB::connection('client_portal')->table('items')->insert([
+            ['id' => 1, 'code' => 'I-1', 'name_ur' => 'پرانا جنس'],
+        ]);
+        DB::connection('client_portal')->table('doc_sequences')->insert([
+            'doc_type' => 'bill:sale_maal',
+            'prefix' => '',
+            'current_number' => 4,
+        ]);
+        $commissionHeadId = DB::connection('client_portal')->table('charge_heads')->insertGetId([
+            'name_en' => 'Commission',
+            'calc_type' => 'percent',
+        ]);
+        $karayaHeadId = DB::connection('client_portal')->table('charge_heads')->insertGetId([
+            'name_en' => 'Karaya',
+            'calc_type' => 'manual',
+        ]);
+        $billId = DB::connection('client_portal')->table('bills')->insertGetId([
+            'inv_no' => 'EDIT-100',
+            'bill_type' => 1,
+            'bill_date' => '2026-01-01',
+            'party_account_id' => 2,
+            'item_id' => 1,
+            'lot_nag' => 2,
+            'status' => 'posted',
+        ]);
+        DB::connection('client_portal')->table('bill_lines')->insert([
+            'bill_id' => $billId,
+            'customer_account_id' => 1,
+            'item_id' => 1,
+            'line_date' => '2026-01-01',
+            'nag' => 2,
+            'wazan' => null,
+            'rate' => 100,
+            'lagana' => 0,
+            'trader_rate' => null,
+            'cust_amount' => 200,
+            'party_amount' => 200,
+            'lagana_amount' => 0,
+            'diff_amount' => 0,
+            'sort_order' => 0,
+        ]);
+        DB::connection('client_portal')->table('bill_charges')->insert([
+            'bill_id' => $billId,
+            'charge_head_id' => $commissionHeadId,
+            'rate' => 1,
+            'amount' => 2,
+        ]);
+
+        $session = [
+            'client_portal_auth' => [
+                'client_id' => $client->id,
+                'slug' => $client->slug,
+            ],
+        ];
+        $this->withSession($session)
+            ->get(route('client.portal.bills.sale', [
+                'slug' => $client->slug,
+                'search' => 'EDIT-100',
+            ]))
+            ->assertOk()
+            ->assertSee('name="bill_id" id="bill_id" value="'.$billId.'"', false)
+            ->assertSee('پرانا جنس')
+            ->assertSee('EDIT-100');
+
+        $response = $this->withSession($session)
+            ->post(route('client.portal.bills.sale.store', ['slug' => $client->slug]), [
+                'bill_id' => $billId,
+                'inv_no' => 'EDIT-100',
+                'bill_date' => '2026-01-03',
+                'party_account_id' => 2,
+                'item_id' => 1,
+                'marka' => 'Updated',
+                'vehicle_no' => 'V-2',
+                'container_no' => 'CN-2',
+                'status' => 'pending',
+                'lines' => [[
+                    'line_date' => '2026-01-03',
+                    'customer_account_id' => 1,
+                    'item_id' => 1,
+                    'nag' => 3,
+                    'wazan' => '',
+                    'rate' => 150,
+                    'lagana' => 5,
+                    'trader_rate' => '',
+                ]],
+                'charges' => [
+                    'commission_pct' => 2,
+                    'karaya' => 10,
+                    'kharch' => 0,
+                    'mazdoori' => 0,
+                    'market' => 0,
+                    'munshiana' => 0,
+                    'stor_karaya' => 0,
+                    'naqdi' => 0,
+                ],
+            ]);
+
+        $response->assertRedirect(route('client.portal.bills.sale', [
+            'slug' => $client->slug,
+            'search' => 'EDIT-100',
+        ]));
+        $this->assertDatabaseHas('bills', [
+            'id' => $billId,
+            'inv_no' => 'EDIT-100',
+            'bill_date' => '2026-01-03',
+            'lot_nag' => 3,
+            'status' => 'pending',
+            'marka' => 'Updated',
+        ], 'client_portal');
+        $this->assertDatabaseHas('bill_lines', [
+            'bill_id' => $billId,
+            'nag' => 3,
+            'rate' => 150,
+            'lagana' => 5,
+        ], 'client_portal');
+        $this->assertDatabaseHas('bill_charges', [
+            'bill_id' => $billId,
+            'charge_head_id' => $commissionHeadId,
+            'rate' => 2,
+        ], 'client_portal');
+        $this->assertDatabaseHas('bill_charges', [
+            'bill_id' => $billId,
+            'charge_head_id' => $karayaHeadId,
+            'rate' => 10,
+            'amount' => 10,
+        ], 'client_portal');
+        $this->assertSame(4, DB::connection('client_portal')->table('doc_sequences')
+            ->where('doc_type', 'bill:sale_maal')->value('current_number'));
+
+        $response = $this->withSession($session)
+            ->post(route('client.portal.bills.sale.store', ['slug' => $client->slug]), [
+                'bill_id' => $billId,
+                'inv_no' => 'EDIT-100',
+                'bill_date' => '2026-01-03',
+                'party_account_id' => 2,
+                'item_id' => 1,
+                'status' => 'posted',
+                'lines' => [[
+                    'line_date' => '2026-01-03',
+                    'customer_account_id' => 1,
+                    'item_id' => 1,
+                    'nag' => 3,
+                    'wazan' => '',
+                    'rate' => 150,
+                    'lagana' => 5,
+                    'trader_rate' => '',
+                ]],
+                'charges' => ['commission_pct' => 2],
+            ]);
+
+        $response->assertRedirect(route('client.portal.bills.sale', [
+            'slug' => $client->slug,
+            'search' => 'EDIT-100',
+        ]));
+        $this->assertDatabaseHas('bills', [
+            'id' => $billId,
+            'status' => 'posted',
+        ], 'client_portal');
+        $this->assertSame(4, DB::connection('client_portal')->table('doc_sequences')
+            ->where('doc_type', 'bill:sale_maal')->value('current_number'));
+    }
+
     public function test_client_ai_api_key_is_encrypted_in_storage(): void
     {
         $client = $this->createActiveClient(['ai_api_key' => 'test-provider-secret']);
@@ -579,6 +808,91 @@ class ClientPortalRoutesTest extends TestCase
             'created_at' => now(),
             'updated_at' => now(),
         ]);
+    }
+
+    private function createTenantSaleBillSearchTables(Client $client): void
+    {
+        app(ClientPortalDatabase::class)->connection($client);
+
+        Schema::connection('client_portal')->create('doc_sequences', function ($table): void {
+            $table->id();
+            $table->string('doc_type');
+            $table->string('prefix')->nullable();
+            $table->unsignedBigInteger('current_number');
+        });
+        Schema::connection('client_portal')->create('account_types', function ($table): void {
+            $table->id();
+            $table->string('name_en')->unique();
+        });
+        Schema::connection('client_portal')->create('accounts', function ($table): void {
+            $table->id();
+            $table->string('code');
+            $table->unsignedBigInteger('account_type_id');
+            $table->boolean('is_active')->default(true);
+            $table->string('name_ur');
+            $table->string('name_en')->nullable();
+            $table->string('city')->nullable();
+            $table->decimal('commission_pct', 5, 2)->default(0);
+        });
+        Schema::connection('client_portal')->create('items', function ($table): void {
+            $table->id();
+            $table->string('code');
+            $table->string('name_ur');
+            $table->string('name_en')->nullable();
+            $table->boolean('is_active')->default(true);
+            $table->decimal('default_commission_pct', 5, 2)->default(0);
+            $table->decimal('default_mazdoori_rate', 10, 2)->default(0);
+            $table->decimal('default_market_fee_rate', 10, 2)->default(0);
+            $table->decimal('default_munshiana_rate', 10, 2)->default(0);
+            $table->decimal('default_lagana', 10, 2)->default(0);
+        });
+        Schema::connection('client_portal')->create('charge_heads', function ($table): void {
+            $table->id();
+            $table->unsignedInteger('sort_order')->default(0);
+            $table->string('name_en');
+            $table->string('calc_type');
+        });
+        Schema::connection('client_portal')->create('bills', function ($table): void {
+            $table->id();
+            $table->string('inv_no')->unique();
+            $table->unsignedInteger('bill_type');
+            $table->date('bill_date');
+            $table->unsignedBigInteger('party_account_id')->nullable();
+            $table->unsignedBigInteger('marfat_account_id')->nullable();
+            $table->unsignedBigInteger('item_id')->nullable();
+            $table->string('marka')->nullable();
+            $table->string('vehicle_no')->nullable();
+            $table->string('container_no')->nullable();
+            $table->string('status');
+            $table->decimal('lot_nag', 10, 2)->default(0);
+            $table->timestamps();
+        });
+        Schema::connection('client_portal')->create('bill_lines', function ($table): void {
+            $table->id();
+            $table->unsignedBigInteger('bill_id');
+            $table->unsignedBigInteger('customer_account_id');
+            $table->unsignedBigInteger('item_id')->nullable();
+            $table->date('line_date')->nullable();
+            $table->decimal('nag', 10, 2)->default(0);
+            $table->decimal('wazan', 10, 2)->nullable();
+            $table->decimal('rate', 10, 2)->default(0);
+            $table->decimal('lagana', 10, 2)->default(0);
+            $table->decimal('trader_rate', 10, 2)->nullable();
+            $table->decimal('cust_amount', 15, 2)->default(0);
+            $table->decimal('party_amount', 15, 2)->default(0);
+            $table->decimal('lagana_amount', 15, 2)->default(0);
+            $table->decimal('diff_amount', 15, 2)->default(0);
+            $table->integer('sort_order')->default(0);
+            $table->timestamps();
+        });
+        Schema::connection('client_portal')->create('bill_charges', function ($table): void {
+            $table->id();
+            $table->unsignedBigInteger('bill_id');
+            $table->unsignedBigInteger('charge_head_id');
+            $table->decimal('rate', 10, 2)->default(0);
+            $table->decimal('amount', 15, 2)->default(0);
+            $table->timestamps();
+        });
     }
 
     private function applyOpeningBalanceMigration(Client $client): void

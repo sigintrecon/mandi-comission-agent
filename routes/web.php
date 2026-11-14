@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\AuditLogController;
 use App\Http\Controllers\Client\AccountController;
+use App\Http\Controllers\Client\BillController;
 use App\Http\Controllers\Client\ItemController;
 use App\Http\Controllers\ClientController;
 use App\Http\Controllers\ClientPortalController;
@@ -103,10 +104,8 @@ Route::prefix('{slug}')
 
         Route::get('/bills', [ClientPortalController::class, 'page'])
             ->defaults('page', 'bills.index')->name('bills.index');
-        Route::get('/bills/sale', [ClientPortalController::class, 'page'])
-            ->defaults('page', 'bills.sale')->name('bills.sale');
-        Route::post('/bills/sale', [ClientPortalController::class, 'storeBill'])
-            ->defaults('billType', 1)->name('bills.sale.store');
+        Route::get('/bills/sale', [BillController::class, 'create'])->name('bills.sale');
+        Route::post('/bills/sale', [BillController::class, 'store'])->name('bills.sale.store');
         Route::get('/bills/khareed', [ClientPortalController::class, 'page'])
             ->defaults('page', 'bills.khareed')->name('bills.khareed');
         Route::post('/bills/khareed', [ClientPortalController::class, 'storeBill'])
