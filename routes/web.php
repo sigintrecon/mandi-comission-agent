@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\AuditLogController;
 use App\Http\Controllers\Client\AccountController;
+use App\Http\Controllers\Client\ItemController;
 use App\Http\Controllers\ClientController;
 use App\Http\Controllers\ClientPortalController;
 use App\Http\Controllers\DashboardController;
@@ -26,7 +27,6 @@ Route::post('/login', function (Request $request) {
 
     return back()->withErrors(['email' => 'Invalid credentials.'])->onlyInput('email');
 });
-
 Route::middleware('auth')->group(function () {
     Route::get('/dashboard', [DashboardController::class, 'index'])->name('dashboard');
     Route::get('/audit-logs', [AuditLogController::class, 'index'])->name('audit.index');
@@ -96,9 +96,10 @@ Route::prefix('{slug}')
         Route::delete('/accounts/{account}', [AccountController::class, 'destroy'])
             ->whereNumber('account')->name('accounts.destroy');
 
-        Route::get('/items/create', [ClientPortalController::class, 'page'])
-            ->defaults('page', 'items.create')->name('items.create');
-        Route::post('/items', [ClientPortalController::class, 'storeItem'])->name('items.store');
+        Route::get('/items/create', [ItemController::class, 'create'])->name('items.create');
+        Route::get('/items/lookup', [ItemController::class, 'lookup'])->name('items.lookup');
+        Route::post('/items', [ItemController::class, 'store'])->name('items.store');
+        Route::delete('/items/{item}', [ItemController::class, 'destroy'])->whereNumber('item')->name('items.destroy');
 
         Route::get('/bills', [ClientPortalController::class, 'page'])
             ->defaults('page', 'bills.index')->name('bills.index');
