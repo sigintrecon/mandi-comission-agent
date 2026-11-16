@@ -87,7 +87,7 @@ body{font-family:'Noto Nastaliq Urdu',serif;background:#b8daff;height:100vh;disp
 .btn-complete,.btn-pending{border:0;border-radius:3px;padding:3px 8px;font-size:13px;font-family:inherit;cursor:pointer;font-weight:bold;white-space:nowrap}
 .btn-complete{background:#ffc107;color:#212529}
 .btn-pending{background:#28a745;color:#fff}
-.btn-cancel-edit,.btn-edit-bill{display:inline-block;border:0;border-radius:3px;background:#0d6efd;color:#fff;padding:3px 8px;font-size:13px;font-family:inherit;font-weight:bold;text-decoration:none;white-space:nowrap}
+.btn-cancel-edit,.btn-edit-bill{display:inline-block;border:0;border-radius:3px;background:#0d6efd;color:#fff;padding:3px 8px;font-size:13px;font-family:inherit;font-weight:bold;text-decoration:none;white-space:nowrap;cursor:pointer}
 .btn-cancel-edit{background:#6c757d}
 .bill-list-toolbar{min-height:42px;margin-top:5px;padding:4px 8px;display:flex;align-items:center;justify-content:space-between;gap:8px;background:#212529;color:#fff}
 .bill-list-toolbar label{font-size:13px;white-space:nowrap}
@@ -321,6 +321,7 @@ tr:hover td{background:#138496}
           <div class="charge-row">
             <label>سٹور کرایہ</label>
             <input type="number" name="charges[stor_karaya]" id="c_stor" min="0" value="0" oninput="calcCharges()">
+            <input type="text" class="c-amt" id="c_stor_amt" readonly>
           </div>
           <div class="charge-row">
             <label>نقدی بل</label>
@@ -355,10 +356,9 @@ tr:hover td{background:#138496}
 
     <div class="bill-list-toolbar">
       <label><input type="checkbox" id="selectAllBills"> تمام بل منتخب کریں</label>
+      <button type="submit" form="printBillsForm" class="btn-edit-bill">منتخب بل پرنٹ</button>
       <div class="bill-list-actions" role="group" aria-label="بل فلٹر">
         <a href="{{ route('client.portal.bills.sale.all', $client->slug) }}">تمام سیل بل</a>
-        <button type="button" data-bill-filter="posted" aria-pressed="false">مکمل سیل بل</button>
-        <button type="button" data-bill-filter="pending" aria-pressed="false">نامکمل بیجک</button>
         <a href="{{ route('client.portal.bills.sale.customers', $client->slug) }}">تمام کسٹمر وضاحت</a>
         <a href="{{ route('client.portal.bills.all', $client->slug) }}">تمام بل</a>
       </div>
@@ -379,8 +379,14 @@ tr:hover td{background:#138496}
               <td>{{ $b->item_names ?: '—' }}</td>
               <td>{{ $b->bill_date }}</td>
               <td>{{ $b->inv_no }}</td>
-              <td><a class="btn-edit-bill" href="{{ route('client.portal.bills.sale', ['slug' => $client->slug, 'search' => $billSearch, 'edit' => $b->id]) }}">ترمیم</a></td>
-              <td><input type="checkbox" class="recent-bill-select" aria-label="بل منتخب کریں"></td>
+              <td>
+                <a class="btn-edit-bill" href="{{ route('client.portal.bills.sale', ['slug' => $client->slug, 'search' => $billSearch, 'edit' => $b->id]) }}">ترمیم</a>
+                <form method="POST" action="{{ route('client.portal.bills.destroy', ['slug' => $client->slug, 'bill' => $b->id]) }}" style="display:inline" onsubmit="return confirm('کیا آپ یہ بل حذف کرنا چاہتے ہیں؟')">
+                  @csrf
+                  <button type="submit" class="btn-edit-bill" style="background:#b42318">حذف</button>
+                </form>
+              </td>
+              <td><input type="checkbox" class="recent-bill-select" name="ids[]" form="printBillsForm" value="{{ $b->id }}" aria-label="بل منتخب کریں"></td>
             </tr>
           @empty
             <tr><td colspan="7" style="text-align:center;background:#fff;color:#666">{{ $billSearch !== '' ? 'کوئی انوائس نہیں ملی' : 'کوئی بل نہیں' }}</td></tr>
@@ -391,6 +397,8 @@ tr:hover td{background:#138496}
 
   </div>{{-- end body-scroll --}}
 </div>{{-- end main --}}
+
+<form id="printBillsForm" method="GET" action="{{ route('client.portal.bills.print', $client->slug) }}"></form>
 
 <script>
 // ═══════════════════════════════════════════════
@@ -794,11 +802,12 @@ function calcCharges(){
     const naqdi    = parseFloat(document.getElementById('c_naqdi').value)    || 0;
 
     const commAmt  = Math.round(gross * commPct / 100);
-    const karayaA  = karaya;
+    const karayaA  = Math.round(karaya * nag);
     const kharchA  = Math.round(kharch * nag);
     const mazA     = Math.round(maz    * nag);
     const mktA     = Math.round(mkt    * nag);
     const munA     = Math.round(mun    * nag);
+    const storA    = Math.round(stor   * nag);
 
     document.getElementById('c_comm_amt').value  = commAmt;
     document.getElementById('c_karaya_amt').value= karayaA;
@@ -806,8 +815,9 @@ function calcCharges(){
     document.getElementById('c_maz_amt').value   = mazA;
     document.getElementById('c_mkt_amt').value   = mktA;
     document.getElementById('c_mun_amt').value   = munA;
+    document.getElementById('c_stor_amt').value  = storA;
 
-    const totalExp = commAmt + karayaA + kharchA + mazA + mktA + munA + stor + naqdi;
+    const totalExp = commAmt + karayaA + kharchA + mazA + mktA + munA + storA + naqdi;
     document.getElementById('t_exp').value  = Number(totalExp.toFixed(2));
     document.getElementById('t_safi').value = Number((gross - totalExp).toFixed(2));
 }

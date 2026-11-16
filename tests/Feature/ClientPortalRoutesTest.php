@@ -113,12 +113,27 @@ class ClientPortalRoutesTest extends TestCase
         DB::connection('client_portal')->table('accounts')->insert([
             ['id' => 1, 'code' => 'C-1', 'account_type_id' => 1, 'is_active' => true, 'name_ur' => 'کسٹمر'],
             ['id' => 2, 'code' => 'P-1', 'account_type_id' => 2, 'is_active' => true, 'name_ur' => 'بیوپاری'],
+            ['id' => 3, 'code' => '4008', 'account_type_id' => 2, 'is_active' => true, 'name_ur' => 'ڈیفرنس'],
+            ['id' => 4, 'code' => '4009', 'account_type_id' => 2, 'is_active' => true, 'name_ur' => 'لگانا'],
+            ['id' => 5, 'code' => '4011', 'account_type_id' => 2, 'is_active' => true, 'name_ur' => 'خرید و فروخت'],
+            ['id' => 6, 'code' => '4010', 'account_type_id' => 2, 'is_active' => true, 'name_ur' => 'کمیشن'],
+        ]);
+        DB::connection('client_portal')->table('account_roles')->insert([
+            ['role_key' => 'difference', 'account_id' => 3],
+            ['role_key' => 'lagana', 'account_id' => 4],
+            ['role_key' => 'sale_purchase', 'account_id' => 5],
         ]);
         DB::connection('client_portal')->table('items')->insert([
             ['id' => 1, 'code' => 'I-1', 'name_ur' => 'جنس'],
         ]);
+        DB::connection('client_portal')->table('charge_heads')->insert([
+            'name_ur' => 'کمیشن',
+            'name_en' => 'Commission',
+            'calc_type' => 'percent',
+            'account_id' => 6,
+        ]);
         DB::connection('client_portal')->table('doc_sequences')->insert([
-            'doc_type' => 'bill:sale_maal',
+            'doc_type' => 'bill:global',
             'prefix' => '',
             'current_number' => 1,
         ]);
@@ -146,6 +161,7 @@ class ClientPortalRoutesTest extends TestCase
                     'lagana' => 4,
                     'trader_rate' => '',
                 ]],
+                'charges' => ['commission_pct' => 12.5],
             ]);
 
         $response->assertRedirect(route('client.portal.bills.sale', ['slug' => $client->slug]));
@@ -155,13 +171,93 @@ class ClientPortalRoutesTest extends TestCase
             'lagana_amount' => 8,
             'cust_amount' => 208,
         ], 'client_portal');
+        $billId = DB::connection('client_portal')->table('bills')->where('inv_no', '1')->value('id');
+        $ledgerTransactionId = DB::connection('client_portal')->table('ledger_txns')
+            ->where('source_type', 'bill')
+            ->where('source_id', $billId)
+            ->value('id');
+        $this->assertSame(208.0, (float) DB::connection('client_portal')->table('ledger_entries')
+            ->where('ledger_txn_id', $ledgerTransactionId)->sum('debit'));
+        $this->assertSame(208.0, (float) DB::connection('client_portal')->table('ledger_entries')
+            ->where('ledger_txn_id', $ledgerTransactionId)->sum('credit'));
+        $this->assertDatabaseHas('ledger_entries', [
+            'ledger_txn_id' => $ledgerTransactionId,
+            'account_id' => 1,
+            'debit' => 208,
+            'credit' => 0,
+        ], 'client_portal');
+        $this->assertDatabaseHas('ledger_entries', [
+            'ledger_txn_id' => $ledgerTransactionId,
+            'account_id' => 2,
+            'debit' => 0,
+            'credit' => 175,
+        ], 'client_portal');
+        $this->assertDatabaseHas('ledger_entries', [
+            'ledger_txn_id' => $ledgerTransactionId,
+            'account_id' => 4,
+            'debit' => 0,
+            'credit' => 8,
+        ], 'client_portal');
+        $this->assertDatabaseHas('ledger_entries', [
+            'ledger_txn_id' => $ledgerTransactionId,
+            'account_id' => 6,
+            'debit' => 0,
+            'credit' => 25,
+        ], 'client_portal');
         $this->assertSame(2, DB::connection('client_portal')->table('doc_sequences')
-            ->where('doc_type', 'bill:sale_maal')->value('current_number'));
+            ->where('doc_type', 'bill:global')->value('current_number'));
+
+        $this->withSession($session)
+            ->post(route('client.portal.bills.destroy', ['slug' => $client->slug, 'bill' => $billId]))
+            ->assertRedirect(route('client.portal.bills.sale', ['slug' => $client->slug]));
+
+        $this->assertDatabaseHas('bills', ['id' => $billId, 'status' => 'reversed'], 'client_portal');
+        $this->assertDatabaseHas('ledger_txns', [
+            'source_type' => 'bill_reversal',
+            'source_id' => $billId,
+        ], 'client_portal');
+        $this->assertSame(208.0, (float) DB::connection('client_portal')->table('ledger_entries')
+            ->where('account_id', 1)->sum('debit'));
+        $this->assertSame(208.0, (float) DB::connection('client_portal')->table('ledger_entries')
+            ->where('account_id', 1)->sum('credit'));
+        $this->assertSame(175.0, (float) DB::connection('client_portal')->table('ledger_entries')
+            ->where('account_id', 2)->sum('debit'));
+        $this->assertSame(175.0, (float) DB::connection('client_portal')->table('ledger_entries')
+            ->where('account_id', 2)->sum('credit'));
+
+        DB::connection('client_portal')->table('doc_sequences')
+            ->where('doc_type', 'bill:global')
+            ->update(['current_number' => 1]);
+
+        $this->withSession($session)
+            ->get(route('client.portal.bills.sale', ['slug' => $client->slug]))
+            ->assertOk()
+            ->assertSee('name="inv_no" id="inv_no" value="2"', false)
+            ->assertSee('منتخب بل پرنٹ')
+            ->assertSee('حذف')
+            ->assertDontSee('data-bill-filter="posted"', false)
+            ->assertDontSee('data-bill-filter="pending"', false);
+
+        DB::connection('client_portal')->table('doc_sequences')
+            ->where('doc_type', 'bill:global')
+            ->delete();
+        DB::connection('client_portal')->table('doc_sequences')->insert([
+            ['doc_type' => 'bill:sale_maal', 'prefix' => '', 'current_number' => 1],
+            ['doc_type' => 'bill:khareed', 'prefix' => '', 'current_number' => 1],
+        ]);
+
+        $this->withSession($session)
+            ->get(route('client.portal.bills.khareed', ['slug' => $client->slug]))
+            ->assertOk()
+            ->assertSee('name="inv_no" id="inv_no" value="2"', false);
 
         $this->withSession($session)
             ->get(route('client.portal.bills.sale', ['slug' => $client->slug]))
             ->assertOk()
             ->assertSee('name="inv_no" id="inv_no" value="2"', false);
+
+        $this->assertSame(2, DB::connection('client_portal')->table('doc_sequences')
+            ->where('doc_type', 'bill:global')->value('current_number'));
     }
 
     public function test_bill_reports_filter_and_paginate_tenant_sale_data(): void
@@ -174,8 +270,8 @@ class ClientPortalRoutesTest extends TestCase
             ['id' => 2, 'name_en' => 'Party'],
         ]);
         DB::connection('client_portal')->table('accounts')->insert([
-            ['id' => 1, 'code' => 'C-1', 'account_type_id' => 1, 'is_active' => true, 'name_ur' => 'کسٹمر'],
-            ['id' => 2, 'code' => 'P-1', 'account_type_id' => 2, 'is_active' => true, 'name_ur' => 'بیوپاری'],
+            ['id' => 1, 'code' => 'C-1', 'account_type_id' => 1, 'is_active' => true, 'name_ur' => 'کسٹمر', 'name_en' => null],
+            ['id' => 2, 'code' => 'P-1', 'account_type_id' => 2, 'is_active' => true, 'name_ur' => 'بیوپاری', 'name_en' => 'Party Company'],
         ]);
         DB::connection('client_portal')->table('items')->insert([
             ['id' => 1, 'code' => 'I-1', 'name_ur' => 'سیب'],
@@ -205,7 +301,18 @@ class ClientPortalRoutesTest extends TestCase
                 'sort_order' => 0,
             ]);
         }
-        DB::connection('client_portal')->table('bills')->insert([
+        $chargeHeadId = DB::connection('client_portal')->table('charge_heads')->insertGetId([
+            'name_ur' => 'خرچہ',
+            'name_en' => 'Kharch',
+            'calc_type' => 'per_nag',
+        ]);
+        DB::connection('client_portal')->table('bill_charges')->insert([
+            'bill_id' => $billId,
+            'charge_head_id' => $chargeHeadId,
+            'rate' => 25,
+            'amount' => 25,
+        ]);
+        $purchaseBillId = DB::connection('client_portal')->table('bills')->insertGetId([
             'inv_no' => 'PUR-1',
             'bill_type' => 2,
             'bill_date' => '2026-01-01',
@@ -214,6 +321,18 @@ class ClientPortalRoutesTest extends TestCase
             'status' => 'posted',
             'lot_nag' => 1,
         ]);
+        DB::connection('client_portal')->table('bill_lines')->insert([
+            'bill_id' => $purchaseBillId,
+            'customer_account_id' => 2,
+            'item_id' => 1,
+            'line_date' => '2026-01-01',
+            'nag' => 1,
+            'rate' => 500,
+            'cust_amount' => 500,
+            'party_amount' => 500,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
         $session = [
             'client_portal_auth' => [
                 'client_id' => $client->id,
@@ -221,22 +340,77 @@ class ClientPortalRoutesTest extends TestCase
             ],
         ];
 
-        $this->withSession($session)
+        $saleBillsResponse = $this->withSession($session)
             ->get(route('client.portal.bills.sale.all', ['slug' => $client->slug]))
-            ->assertOk()
-            ->assertSee('<h1>تمام سیل بل</h1>', false)
+            ->assertOk();
+        $saleBillsResponse->assertSee('<h1>تمام سیل بل</h1>', false)
+            ->assertSee('Option / INV')
+            ->assertSee('Date / Name')
+            ->assertSee('Credit Amount')
+            ->assertSee('منتخب بل پرنٹ')
+            ->assertSee('name="ids[]"', false)
+            ->assertSee('حذف')
+            ->assertSee('SALE-11/2026-01-01')
+            ->assertSee('Party Company')
+            ->assertSee('175.00')
+            ->assertSee('25.00')
+            ->assertSee('200.00')
+            ->assertDontSee('لاگ آؤٹ')
             ->assertViewHas('bills', fn ($bills) => $bills->total() === 11 && $bills->count() === 10);
+
+        $saleBillId = DB::connection('client_portal')->table('bills')->where('inv_no', 'SALE-11')->value('id');
+        $this->withSession($session)
+            ->post(route('client.portal.settings.update', ['slug' => $client->slug]), [
+                'firm_name' => 'Mandi Print House',
+                'address' => 'Main Market Faisalabad',
+                'phone' => '03000000001',
+                'phone_2' => '03000000002',
+                'phone_3' => '03000000003',
+            ])
+            ->assertRedirect();
+
+        $this->assertDatabaseHas('settings', ['key' => 'phone_3', 'value' => '03000000003'], 'client_portal');
+        $this->withSession($session)
+            ->get(route('client.portal.bills.print', ['slug' => $client->slug, 'ids' => [$saleBillId]]))
+            ->assertOk()
+            ->assertSee('Mandi Print House')
+            ->assertSee('Main Market Faisalabad')
+            ->assertSee('03000000001')
+            ->assertSee('03000000002')
+            ->assertSee('03000000003')
+            ->assertSee('Software by Elemeentra')
+            ->assertSee('WhatsApp:03260161325')
+            ->assertSee('بیوپاری')
+            ->assertDontSee('Party Company')
+            ->assertDontSee('P-1')
+            ->assertDontSee('حالت')
+            ->assertSee('بل نمبر')
+            ->assertSee('ٹوٹل نگ')
+            ->assertSee('کنٹینر نمبر')
+            ->assertSee('جنس')
+            ->assertSee('کسٹم')
+            ->assertSee('کل جمع رقم')
+            ->assertSee('SALE-11')
+            ->assertSee('175.00')
+            ->assertSee('25.00');
 
         $this->withSession($session)
             ->get(route('client.portal.bills.all', ['slug' => $client->slug]))
             ->assertOk()
             ->assertSee('PUR-1')
+            ->assertSee('بیوپاری (P-1)')
+            ->assertSee('سیب')
+            ->assertSee('پرنٹ')
+            ->assertSee('حذف')
+            ->assertDontSee('لاگ آؤٹ')
             ->assertViewHas('bills', fn ($bills) => $bills->total() === 12 && $bills->count() === 10);
 
         $this->withSession($session)
             ->get(route('client.portal.bills.sale.customers', ['slug' => $client->slug]))
             ->assertOk()
             ->assertSee('<h1>تمام کسٹمر وضاحت</h1>', false)
+            ->assertSee('کسٹمر (C-1)')
+            ->assertDontSee('لاگ آؤٹ')
             ->assertViewHas('lines', fn ($lines) => $lines->total() === 11 && $lines->count() === 10);
 
         $filters = [
@@ -262,6 +436,82 @@ class ClientPortalRoutesTest extends TestCase
             ->assertViewHas('lines', fn ($lines) => $lines->total() === 1 && $lines->count() === 1);
     }
 
+    public function test_khareed_bill_debits_goods_and_credits_the_vendor(): void
+    {
+        $this->tenantDatabasePath = tempnam(sys_get_temp_dir(), 'mandi-tenant-');
+        $client = $this->createActiveClient(['database_name' => $this->tenantDatabasePath]);
+        $this->createTenantSaleBillSearchTables($client);
+        DB::connection('client_portal')->table('account_types')->insert([
+            ['id' => 1, 'name_en' => 'Customer'],
+            ['id' => 2, 'name_en' => 'Party'],
+        ]);
+        DB::connection('client_portal')->table('accounts')->insert([
+            ['id' => 1, 'code' => 'C-1', 'account_type_id' => 1, 'is_active' => true, 'name_ur' => 'کسٹمر'],
+            ['id' => 2, 'code' => 'P-1', 'account_type_id' => 2, 'is_active' => true, 'name_ur' => 'بیوپاری'],
+            ['id' => 3, 'code' => '4008', 'account_type_id' => 2, 'is_active' => true, 'name_ur' => 'ڈیفرنس'],
+            ['id' => 4, 'code' => '4009', 'account_type_id' => 2, 'is_active' => true, 'name_ur' => 'لگانا'],
+            ['id' => 5, 'code' => '4011', 'account_type_id' => 2, 'is_active' => true, 'name_ur' => 'خرید و فروخت'],
+        ]);
+        DB::connection('client_portal')->table('account_roles')->insert([
+            ['role_key' => 'sale_purchase', 'account_id' => 5],
+        ]);
+        DB::connection('client_portal')->table('items')->insert([
+            ['id' => 1, 'code' => 'I-1', 'name_ur' => 'ادرک'],
+        ]);
+        DB::connection('client_portal')->table('doc_sequences')->insert([
+            'doc_type' => 'bill:global',
+            'prefix' => '',
+            'current_number' => 1,
+        ]);
+        $session = [
+            'client_portal_auth' => [
+                'client_id' => $client->id,
+                'slug' => $client->slug,
+            ],
+        ];
+
+        $response = $this->withSession($session)
+            ->post(route('client.portal.bills.khareed.store', ['slug' => $client->slug]), [
+                'inv_no' => '1',
+                'bill_date' => '2026-01-03',
+                'party_account_id' => 2,
+                'item_id' => 1,
+                'status' => 'posted',
+                'lines' => [[
+                    'item_id' => 1,
+                    'nag' => 2,
+                    'wazan' => '',
+                    'rate' => 100,
+                    'trader_rate' => '',
+                ]],
+            ]);
+
+        $response->assertRedirect(route('client.portal.bills.khareed', ['slug' => $client->slug]));
+        $billId = DB::connection('client_portal')->table('bills')->where('inv_no', '1')->value('id');
+        $ledgerTransactionId = DB::connection('client_portal')->table('ledger_txns')
+            ->where('source_type', 'bill')
+            ->where('source_id', $billId)
+            ->value('id');
+        $this->assertDatabaseHas('ledger_entries', [
+            'ledger_txn_id' => $ledgerTransactionId,
+            'account_id' => 5,
+            'debit' => 200,
+            'credit' => 0,
+        ], 'client_portal');
+        $this->assertDatabaseHas('ledger_entries', [
+            'ledger_txn_id' => $ledgerTransactionId,
+            'account_id' => 2,
+            'debit' => 0,
+            'credit' => 200,
+        ], 'client_portal');
+        $this->assertDatabaseHas('bill_lines', [
+            'bill_id' => $billId,
+            'customer_account_id' => 2,
+            'item_id' => 1,
+            'party_amount' => 200,
+        ], 'client_portal');
+    }
+
     public function test_sale_invoice_can_be_loaded_and_updated_from_the_bill_list(): void
     {
         $this->tenantDatabasePath = tempnam(sys_get_temp_dir(), 'mandi-tenant-');
@@ -275,6 +525,10 @@ class ClientPortalRoutesTest extends TestCase
         DB::connection('client_portal')->table('accounts')->insert([
             ['id' => 1, 'code' => 'C-1', 'account_type_id' => 1, 'name_ur' => 'پرانا گاہک'],
             ['id' => 2, 'code' => 'P-1', 'account_type_id' => 2, 'name_ur' => 'پرانا بیوپاری'],
+            ['id' => 3, 'code' => '4009', 'account_type_id' => 2, 'name_ur' => 'لگانا'],
+        ]);
+        DB::connection('client_portal')->table('account_roles')->insert([
+            ['role_key' => 'lagana', 'account_id' => 3],
         ]);
         DB::connection('client_portal')->table('items')->insert([
             ['id' => 1, 'code' => 'I-1', 'name_ur' => 'پرانا جنس'],
@@ -291,6 +545,10 @@ class ClientPortalRoutesTest extends TestCase
         $karayaHeadId = DB::connection('client_portal')->table('charge_heads')->insertGetId([
             'name_en' => 'Karaya',
             'calc_type' => 'manual',
+        ]);
+        $storeRentHeadId = DB::connection('client_portal')->table('charge_heads')->insertGetId([
+            'name_en' => 'Store Rent',
+            'calc_type' => 'per_nag',
         ]);
         $billId = DB::connection('client_portal')->table('bills')->insertGetId([
             'inv_no' => 'EDIT-100',
@@ -369,7 +627,7 @@ class ClientPortalRoutesTest extends TestCase
                     'mazdoori' => 0,
                     'market' => 0,
                     'munshiana' => 0,
-                    'stor_karaya' => 0,
+                    'stor_karaya' => 10,
                     'naqdi' => 0,
                 ],
             ]);
@@ -403,7 +661,13 @@ class ClientPortalRoutesTest extends TestCase
             'bill_id' => $billId,
             'charge_head_id' => $karayaHeadId,
             'rate' => 10,
-            'amount' => 10,
+            'amount' => 30,
+        ], 'client_portal');
+        $this->assertDatabaseHas('bill_charges', [
+            'bill_id' => $billId,
+            'charge_head_id' => $storeRentHeadId,
+            'rate' => 10,
+            'amount' => 30,
         ], 'client_portal');
         $this->assertSame(4, DB::connection('client_portal')->table('doc_sequences')
             ->where('doc_type', 'bill:sale_maal')->value('current_number'));
@@ -437,6 +701,14 @@ class ClientPortalRoutesTest extends TestCase
             'id' => $billId,
             'status' => 'posted',
         ], 'client_portal');
+        $postedLedgerTransactionId = DB::connection('client_portal')->table('ledger_txns')
+            ->where('source_type', 'bill')
+            ->where('source_id', $billId)
+            ->value('id');
+        $this->assertSame(465.0, (float) DB::connection('client_portal')->table('ledger_entries')
+            ->where('ledger_txn_id', $postedLedgerTransactionId)->sum('debit'));
+        $this->assertSame(465.0, (float) DB::connection('client_portal')->table('ledger_entries')
+            ->where('ledger_txn_id', $postedLedgerTransactionId)->sum('credit'));
         $this->assertSame(4, DB::connection('client_portal')->table('doc_sequences')
             ->where('doc_type', 'bill:sale_maal')->value('current_number'));
     }
@@ -945,6 +1217,7 @@ class ClientPortalRoutesTest extends TestCase
             $table->id();
             $table->string('key')->unique();
             $table->text('value')->nullable();
+            $table->timestamps();
         });
         Schema::connection('client_portal')->create('accounts', function ($table): void {
             $table->id();
@@ -980,9 +1253,11 @@ class ClientPortalRoutesTest extends TestCase
 
         Schema::connection('client_portal')->create('doc_sequences', function ($table): void {
             $table->id();
-            $table->string('doc_type');
+            $table->string('doc_type')->unique();
             $table->string('prefix')->nullable();
             $table->unsignedBigInteger('current_number');
+            $table->string('reset_policy')->default('never');
+            $table->timestamps();
         });
         Schema::connection('client_portal')->create('account_types', function ($table): void {
             $table->id();
@@ -1013,8 +1288,39 @@ class ClientPortalRoutesTest extends TestCase
         Schema::connection('client_portal')->create('charge_heads', function ($table): void {
             $table->id();
             $table->unsignedInteger('sort_order')->default(0);
+            $table->string('name_ur')->nullable();
             $table->string('name_en');
             $table->string('calc_type');
+            $table->unsignedBigInteger('account_id')->default(1);
+        });
+        Schema::connection('client_portal')->create('settings', function ($table): void {
+            $table->id();
+            $table->string('key')->unique();
+            $table->text('value')->nullable();
+            $table->timestamps();
+        });
+        Schema::connection('client_portal')->create('account_roles', function ($table): void {
+            $table->id();
+            $table->string('role_key')->unique();
+            $table->unsignedBigInteger('account_id');
+        });
+        Schema::connection('client_portal')->create('ledger_txns', function ($table): void {
+            $table->id();
+            $table->string('idempotency_key')->unique();
+            $table->string('source_type');
+            $table->unsignedBigInteger('source_id')->nullable();
+            $table->date('entry_date');
+            $table->string('narration')->nullable();
+            $table->timestamps();
+        });
+        Schema::connection('client_portal')->create('ledger_entries', function ($table): void {
+            $table->id();
+            $table->unsignedBigInteger('ledger_txn_id');
+            $table->unsignedBigInteger('account_id');
+            $table->decimal('debit', 15, 2)->default(0);
+            $table->decimal('credit', 15, 2)->default(0);
+            $table->string('narration')->nullable();
+            $table->timestamps();
         });
         Schema::connection('client_portal')->create('bills', function ($table): void {
             $table->id();

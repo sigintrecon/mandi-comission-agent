@@ -108,12 +108,13 @@ Route::prefix('{slug}')
         Route::get('/bills/sale/all', [BillController::class, 'allSaleBills'])->name('bills.sale.all');
         Route::get('/bills/sale/customers', [BillController::class, 'customerExplanation'])
             ->name('bills.sale.customers');
+        Route::get('/bills/print', [BillController::class, 'printSelected'])->name('bills.print');
+        Route::post('/bills/{bill}/delete', [BillController::class, 'destroy'])
+            ->whereNumber('bill')->name('bills.destroy');
         Route::get('/bills/all', [BillController::class, 'allBills'])->name('bills.all');
         Route::post('/bills/sale', [BillController::class, 'store'])->name('bills.sale.store');
-        Route::get('/bills/khareed', [ClientPortalController::class, 'page'])
-            ->defaults('page', 'bills.khareed')->name('bills.khareed');
-        Route::post('/bills/khareed', [ClientPortalController::class, 'storeBill'])
-            ->defaults('billType', 2)->name('bills.khareed.store');
+        Route::get('/bills/khareed', [BillController::class, 'createKhareed'])->name('bills.khareed');
+        Route::post('/bills/khareed', [BillController::class, 'storeKhareed'])->name('bills.khareed.store');
         Route::get('/bills/customer', [ClientPortalController::class, 'page'])
             ->defaults('page', 'bills.customer')->name('bills.customer');
         Route::post('/bills/customer', [ClientPortalController::class, 'storeBill'])

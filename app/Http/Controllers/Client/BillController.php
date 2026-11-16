@@ -4,12 +4,16 @@ namespace App\Http\Controllers\Client;
 
 use App\Http\Controllers\Controller;
 use App\Models\Client;
+use App\Services\BillLedgerPoster;
 use App\Services\ClientPortalDatabase;
+use Illuminate\Database\Connection;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\View\View;
+use stdClass;
+use Throwable;
 
 class BillController extends Controller
 {
@@ -25,7 +29,55 @@ class BillController extends Controller
         'naqdi' => 'Cash Payment',
     ];
 
-    public function __construct(private ClientPortalDatabase $databases) {}
+    public function __construct(
+        private ClientPortalDatabase $databases,
+        private BillLedgerPoster $ledgerPoster,
+    ) {}
+
+    private function sharedBillSequence(Connection $db): stdClass
+    {
+        $sequence = $db->table('doc_sequences')
+            ->where('doc_type', 'bill:global')
+            ->first(['current_number', 'prefix']);
+
+        if (! $sequence) {
+            $legacySequences = $db->table('doc_sequences')
+                ->whereIn('doc_type', ['bill:sale_maal', 'bill:khareed'])
+                ->orderBy('id')
+                ->get(['current_number', 'prefix']);
+            $prefix = (string) ($legacySequences->first()?->prefix ?? '');
+            $currentNumber = max(1, (int) ($legacySequences->max('current_number') ?? 1));
+
+            $db->table('doc_sequences')->insertOrIgnore([
+                'doc_type' => 'bill:global',
+                'prefix' => $prefix,
+                'current_number' => $currentNumber,
+                'reset_policy' => 'never',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+            $sequence = $db->table('doc_sequences')
+                ->where('doc_type', 'bill:global')
+                ->first(['current_number', 'prefix']);
+        }
+
+        $currentNumber = (int) $sequence->current_number;
+        $prefix = (string) ($sequence->prefix ?? '');
+
+        while ($db->table('bills')->where('inv_no', $prefix.$currentNumber)->exists()) {
+            $currentNumber++;
+        }
+
+        if ($currentNumber !== (int) $sequence->current_number) {
+            $db->table('doc_sequences')
+                ->where('doc_type', 'bill:global')
+                ->update(['current_number' => $currentNumber, 'updated_at' => now()]);
+            $sequence->current_number = $currentNumber;
+        }
+
+        return $sequence;
+    }
 
     // ── GET /{slug}/bills/sale ────────────────────────────
     public function create(Request $request): View
@@ -40,10 +92,7 @@ class BillController extends Controller
 
         $db = $this->databases->connection($client);
 
-        // Next invoice number from doc_sequences
-        $seq = $db->table('doc_sequences')
-            ->where('doc_type', 'bill:sale_maal')
-            ->first(['current_number', 'prefix']);
+        $seq = $this->sharedBillSequence($db);
         $nextInv = $seq ? ($seq->prefix.$seq->current_number) : '1';
 
         // Party accounts (بیوپاری type)
@@ -83,6 +132,7 @@ class BillController extends Controller
         // Show recent bills by default and every matching bill for a search.
         $recentBills = $db->table('bills')
             ->where('bill_type', 1)
+            ->where('status', '!=', 'reversed')
             ->when($billSearch !== '', fn ($query) => $query->where('inv_no', 'like', '%'.$billSearch.'%'))
             ->orderByDesc('id')
             ->when($billSearch === '', fn ($query) => $query->limit(50))
@@ -103,6 +153,7 @@ class BillController extends Controller
         if ($request->filled('edit')) {
             $editableBill = $db->table('bills')
                 ->where('bill_type', 1)
+                ->where('status', '!=', 'reversed')
                 ->where('id', $request->integer('edit'))
                 ->first();
 
@@ -110,6 +161,7 @@ class BillController extends Controller
         } elseif ($billSearch !== '') {
             $editableBill = $db->table('bills')
                 ->where('bill_type', 1)
+                ->where('status', '!=', 'reversed')
                 ->where(function ($query) use ($billSearch, $recentBills): void {
                     $query->where('inv_no', $billSearch);
                     if ($recentBills->count() === 1) {
@@ -161,6 +213,76 @@ class BillController extends Controller
         return $this->billReport($request, true);
     }
 
+    public function printSelected(Request $request): View
+    {
+        $client = $request->attributes->get('clientPortalClient');
+        abort_unless($client instanceof Client, 404);
+
+        $validated = $request->validate([
+            'ids' => ['required', 'array', 'min:1', 'max:50'],
+            'ids.*' => ['required', 'integer', 'min:1', 'distinct'],
+        ]);
+        $billIds = array_map('intval', $validated['ids']);
+        $db = $this->databases->connection($client);
+
+        $bills = $db->table('bills as bills')
+            ->leftJoin('accounts as parties', 'parties.id', '=', 'bills.party_account_id')
+            ->leftJoin('accounts as marfat', 'marfat.id', '=', 'bills.marfat_account_id')
+            ->whereIn('bills.id', $billIds)
+            ->whereIn('bills.bill_type', [1, 2])
+            ->where('bills.status', '!=', 'reversed')
+            ->orderBy('bills.bill_date')
+            ->orderBy('bills.id')
+            ->get([
+                'bills.id', 'bills.inv_no', 'bills.bill_type', 'bills.bill_date',
+                'bills.marka', 'bills.vehicle_no', 'bills.container_no', 'bills.lot_nag', 'bills.status',
+                'parties.code as party_code', 'parties.name_ur as party_name',
+                'parties.name_en as party_name_en', 'marfat.name_ur as marfat_name',
+            ]);
+
+        abort_unless($bills->count() === count($billIds), 404);
+
+        $lines = $db->table('bill_lines as lines')
+            ->leftJoin('accounts as customers', 'customers.id', '=', 'lines.customer_account_id')
+            ->leftJoin('items', 'items.id', '=', 'lines.item_id')
+            ->whereIn('lines.bill_id', $billIds)
+            ->orderBy('lines.sort_order')
+            ->get([
+                'lines.bill_id', 'customers.code as customer_code', 'customers.name_ur as customer_name',
+                'items.code as item_code', 'items.name_ur as item_name', 'lines.nag', 'lines.wazan',
+                'lines.rate', 'lines.lagana', 'lines.cust_amount', 'lines.party_amount',
+            ])
+            ->groupBy('bill_id');
+
+        $charges = $db->table('bill_charges as charges')
+            ->join('charge_heads as heads', 'heads.id', '=', 'charges.charge_head_id')
+            ->whereIn('charges.bill_id', $billIds)
+            ->orderBy('heads.sort_order')
+            ->get([
+                'charges.bill_id', 'heads.name_ur', 'heads.name_en', 'charges.rate', 'charges.amount',
+            ])
+            ->groupBy('bill_id');
+
+        $bills->each(function ($bill) use ($lines, $charges): void {
+            $bill->lines = $lines->get($bill->id, collect());
+            $bill->charges = $charges->get($bill->id, collect());
+            $bill->gross_amount = $bill->lines->sum('party_amount');
+            $bill->expense_amount = $bill->charges->sum('amount');
+            $bill->safi_amount = $bill->gross_amount - $bill->expense_amount;
+        });
+
+        $settings = $db->table('settings')->pluck('value', 'key');
+        $firmName = $settings->get('firm_name') ?: $client->name;
+        $firmAddress = $settings->get('address') ?: $client->address;
+        $firmPhones = collect([
+            $settings->get('phone') ?: $client->phone,
+            $settings->get('phone_2'),
+            $settings->get('phone_3'),
+        ])->filter(fn ($phone) => filled($phone))->unique()->values();
+
+        return view('portal.bills.print', compact('bills', 'client', 'firmName', 'firmAddress', 'firmPhones'));
+    }
+
     private function billReport(Request $request, bool $saleOnly): View
     {
         $client = $request->attributes->get('clientPortalClient');
@@ -172,6 +294,7 @@ class BillController extends Controller
         $bills = $db->table('bills as bills')
             ->leftJoin('accounts as parties', 'parties.id', '=', 'bills.party_account_id')
             ->leftJoin('accounts as marfat', 'marfat.id', '=', 'bills.marfat_account_id')
+            ->where('bills.status', '!=', 'reversed')
             ->when($saleOnly, fn ($query) => $query->where('bills.bill_type', 1))
             ->when($filters['from'] !== '', fn ($query) => $query->whereDate('bills.bill_date', '>=', $filters['from']))
             ->when($filters['to'] !== '', fn ($query) => $query->whereDate('bills.bill_date', '<=', $filters['to']))
@@ -202,7 +325,8 @@ class BillController extends Controller
                 'bills.id', 'bills.inv_no', 'bills.bill_type', 'bills.bill_date',
                 'bills.party_account_id', 'bills.marfat_account_id', 'bills.item_id',
                 'bills.marka', 'bills.vehicle_no', 'bills.container_no',
-                'bills.lot_nag', 'bills.status', 'parties.name_ur as party_name',
+                'bills.lot_nag', 'bills.status', 'parties.code as party_code',
+                'parties.name_ur as party_name', 'parties.name_en as party_name_en',
                 'marfat.name_ur as marfat_name',
             ])
             ->paginate($filters['per_page'])
@@ -235,6 +359,10 @@ class BillController extends Controller
         $bills->getCollection()->each(function ($bill) use ($lineGroups, $chargeGroups): void {
             $bill->lines = $lineGroups->get($bill->id, collect());
             $bill->charges = $chargeGroups->get($bill->id, collect());
+            $bill->item_names = $bill->lines->pluck('item_name')->filter()->unique()->implode('، ');
+            $bill->expenses = $bill->charges->sum('amount');
+            $bill->amount = $bill->lines->sum('party_amount') - $bill->expenses;
+            $bill->credit_amount = $bill->amount + $bill->expenses;
         });
 
         $customers = $db->table('accounts as accounts')
@@ -264,6 +392,7 @@ class BillController extends Controller
             ->leftJoin('accounts as parties', 'parties.id', '=', 'bills.party_account_id')
             ->leftJoin('items', 'items.id', '=', 'lines.item_id')
             ->where('bills.bill_type', 1)
+            ->where('bills.status', '!=', 'reversed')
             ->when($filters['from'] !== '', fn ($query) => $query->whereDate('bills.bill_date', '>=', $filters['from']))
             ->when($filters['to'] !== '', fn ($query) => $query->whereDate('bills.bill_date', '<=', $filters['to']))
             ->when($filters['invoice'] !== '', fn ($query) => $query->where('bills.inv_no', 'like', '%'.$filters['invoice'].'%'))
@@ -343,6 +472,7 @@ class BillController extends Controller
         if (! empty($validated['bill_id'])) {
             $billToUpdate = $db->table('bills')
                 ->where('bill_type', 1)
+                ->where('status', '!=', 'reversed')
                 ->where('id', $validated['bill_id'])
                 ->first();
 
@@ -423,12 +553,12 @@ class BillController extends Controller
         $naqdi = (float) ($chargesInput['naqdi'] ?? 0);
 
         $totalExpenses = $commAmount
-            + $karayaRate
+            + ($karayaRate * $totalNag)
             + ($kharchRate * $totalNag)
             + ($mazdooriRate * $totalNag)
             + ($marketRate * $totalNag)
             + ($munshiRate * $totalNag)
-            + $storKaraya
+            + ($storKaraya * $totalNag)
             + $naqdi;
 
         $safiAmount = $totalGross - $totalExpenses;
@@ -436,6 +566,10 @@ class BillController extends Controller
         // ── Insert bill (DB transaction) ──────────────────
         try {
             $db->beginTransaction();
+
+            if ($billToUpdate) {
+                $this->ledgerPoster->reverse($db, (int) $billToUpdate->id);
+            }
 
             $billData = [
                 'inv_no' => $validated['inv_no'],
@@ -460,8 +594,9 @@ class BillController extends Controller
                 $db->table('bill_lines')->where('bill_id', $billId)->delete();
                 $db->table('bill_charges')->where('bill_id', $billId)->delete();
             } else {
+                $this->sharedBillSequence($db);
                 $db->table('doc_sequences')
-                    ->where('doc_type', 'bill:sale_maal')
+                    ->where('doc_type', 'bill:global')
                     ->increment('current_number');
                 $billData['created_at'] = now();
                 $billId = $db->table('bills')->insertGetId($billData);
@@ -482,12 +617,12 @@ class BillController extends Controller
             $chargeRows = [];
             $chargeMap = [
                 'Commission' => ['rate' => $commPct,       'amount' => $commAmount],
-                'Karaya' => ['rate' => $karayaRate,    'amount' => round($karayaRate, 2)],
+                'Karaya' => ['rate' => $karayaRate,    'amount' => round($karayaRate * $totalNag, 2)],
                 'Kharch' => ['rate' => $kharchRate,    'amount' => round($kharchRate * $totalNag, 2)],
                 'Mazdoori' => ['rate' => $mazdooriRate,  'amount' => round($mazdooriRate * $totalNag, 2)],
                 'Market Fee' => ['rate' => $marketRate,    'amount' => round($marketRate * $totalNag, 2)],
                 'Munshiana' => ['rate' => $munshiRate,    'amount' => round($munshiRate * $totalNag, 2)],
-                'Store Rent' => ['rate' => 0,              'amount' => $storKaraya],
+                'Store Rent' => ['rate' => $storKaraya,    'amount' => round($storKaraya * $totalNag, 2)],
                 'Cash Payment' => ['rate' => 0,              'amount' => $naqdi],
             ];
 
@@ -509,6 +644,10 @@ class BillController extends Controller
                 $db->table('bill_charges')->insert($chargeRows);
             }
 
+            if ($validated['status'] === 'posted') {
+                $this->ledgerPoster->post($db, (int) $billId);
+            }
+
             $db->commit();
 
         } catch (QueryException $e) {
@@ -520,6 +659,10 @@ class BillController extends Controller
                     ->withInput()
                     ->withErrors(['inv_no' => 'یہ انوائس نمبر پہلے سے موجود ہے۔']);
             }
+
+            throw $e;
+        } catch (Throwable $e) {
+            $db->rollBack();
 
             throw $e;
         }
@@ -542,6 +685,389 @@ class BillController extends Controller
     /**
      * @return array{from: string, to: string, customer_id: string, item_id: string, invoice: string, status: string, per_page: int}
      */
+    // ── GET /{slug}/bills/khareed ─────────────────────────
+    public function createKhareed(Request $request): View
+    {
+        $client = $request->attributes->get('clientPortalClient');
+        abort_unless($client instanceof Client, 404);
+
+        $validated = $request->validate([
+            'search' => ['nullable', 'string', 'max:50'],
+        ]);
+        $billSearch = trim($validated['search'] ?? '');
+
+        $db = $this->databases->connection($client);
+
+        $seq = $this->sharedBillSequence($db);
+        $nextInv = $seq ? ($seq->prefix.$seq->current_number) : '1';
+
+        // Party accounts (بیوپاری type)
+        $parties = $db->table('accounts as a')
+            ->join('account_types as t', 't.id', '=', 'a.account_type_id')
+            ->where('t.name_en', 'Party')
+            ->where('a.is_active', true)
+            ->orderBy('a.name_ur')
+            ->get(['a.id', 'a.code', 'a.name_ur', 'a.name_en', 'a.commission_pct', 'a.city']);
+
+        // Marfat — same as Customer accounts
+        $customers = $db->table('accounts as a')
+            ->join('account_types as t', 't.id', '=', 'a.account_type_id')
+            ->where('t.name_en', 'Customer')
+            ->where('a.is_active', true)
+            ->orderBy('a.name_ur')
+            ->get(['a.id', 'a.code', 'a.name_ur', 'a.name_en', 'a.city']);
+        $marfatList = $customers;
+
+        // Items
+        $items = $db->table('items')
+            ->where('is_active', true)
+            ->orderBy('name_ur')
+            ->get(['id', 'code', 'name_ur', 'name_en',
+                'default_commission_pct', 'default_mazdoori_rate',
+                'default_market_fee_rate', 'default_munshiana_rate',
+                'default_lagana']);
+
+        $chargeHeads = $db->table('charge_heads')
+            ->orderBy('sort_order')
+            ->get(['id', 'name_en', 'calc_type']);
+
+        // Recent Khareed bills (bill_type = 2)
+        $recentBills = $db->table('bills')
+            ->where('bill_type', 2)
+            ->where('status', '!=', 'reversed')
+            ->when($billSearch !== '', fn ($q) => $q->where('inv_no', 'like', '%'.$billSearch.'%'))
+            ->orderByDesc('id')
+            ->when($billSearch === '', fn ($q) => $q->limit(50))
+            ->get(['id', 'inv_no', 'bill_date', 'status', 'lot_nag']);
+
+        $billItemNames = $db->table('bill_lines as lines')
+            ->join('items', 'items.id', '=', 'lines.item_id')
+            ->whereIn('lines.bill_id', $recentBills->pluck('id'))
+            ->orderBy('lines.sort_order')
+            ->get(['lines.bill_id', 'items.name_ur'])
+            ->groupBy('bill_id')
+            ->map(fn ($its) => $its->pluck('name_ur')->unique()->implode('، '));
+        $recentBills->each(function ($bill) use ($billItemNames): void {
+            $bill->item_names = $billItemNames->get($bill->id, '');
+        });
+
+        $editableBill = null;
+        if ($request->filled('edit')) {
+            $editableBill = $db->table('bills')
+                ->where('bill_type', 2)
+                ->where('status', '!=', 'reversed')
+                ->where('id', $request->integer('edit'))
+                ->first();
+            abort_unless($editableBill, 404);
+        } elseif ($billSearch !== '') {
+            $editableBill = $db->table('bills')
+                ->where('bill_type', 2)
+                ->where('status', '!=', 'reversed')
+                ->where(function ($query) use ($billSearch, $recentBills): void {
+                    $query->where('inv_no', $billSearch);
+                    if ($recentBills->count() === 1) {
+                        $query->orWhere('id', $recentBills->first()->id);
+                    }
+                })
+                ->first();
+        }
+
+        if ($editableBill) {
+            $editableBill->lines = $db->table('bill_lines as lines')
+                ->leftJoin('accounts as customers', 'customers.id', '=', 'lines.customer_account_id')
+                ->leftJoin('items', 'items.id', '=', 'lines.item_id')
+                ->where('lines.bill_id', $editableBill->id)
+                ->orderBy('lines.sort_order')
+                ->get([
+                    'lines.line_date', 'lines.customer_account_id',
+                    'customers.code as customer_code', 'customers.name_ur as customer_name',
+                    'lines.item_id', 'items.code as item_code', 'items.name_ur as item_name',
+                    'lines.nag', 'lines.wazan', 'lines.rate',
+                    'lines.lagana', 'lines.lagana_amount', 'lines.trader_rate',
+                ]);
+            $editableBill->charges = $db->table('bill_charges')
+                ->join('charge_heads', 'charge_heads.id', '=', 'bill_charges.charge_head_id')
+                ->where('bill_charges.bill_id', $editableBill->id)
+                ->pluck('bill_charges.rate', 'charge_heads.name_en');
+        }
+
+        $markaList = $db->table('bills')
+            ->whereNotNull('marka')->where('marka', '!=', '')
+            ->distinct()->orderBy('marka')->pluck('marka');
+
+        return view('portal.bills.khareed', compact(
+            'client', 'nextInv', 'parties', 'customers',
+            'marfatList', 'items', 'chargeHeads', 'recentBills',
+            'markaList', 'billSearch', 'editableBill'
+        ));
+    }
+
+    // ── POST /{slug}/bills/khareed ────────────────────────
+    public function storeKhareed(Request $request): RedirectResponse
+    {
+        $client = $request->attributes->get('clientPortalClient');
+        abort_unless($client instanceof Client, 404);
+
+        $validated = $request->validate([
+            'inv_no' => ['required', 'string', 'max:50'],
+            'bill_id' => ['nullable', 'integer', 'min:1'],
+            'bill_date' => ['required', 'date'],
+            'party_account_id' => ['required', 'integer', 'min:1'],
+            'marfat_account_id' => ['nullable', 'integer', 'min:1'],
+            'item_id' => ['nullable', 'integer', 'min:1'],
+            'marka' => ['nullable', 'string', 'max:100'],
+            'vehicle_no' => ['nullable', 'string', 'max:50'],
+            'container_no' => ['nullable', 'string', 'max:50'],
+            'status' => ['required', 'in:pending,posted'],
+            // Lines — khareed mein customer_account_id optional (hidden in UI)
+            'lines' => ['required', 'array', 'min:1'],
+            'lines.*.nag' => ['required', 'numeric', 'min:0'],
+            'lines.*.wazan' => ['nullable', 'numeric', 'min:0'],
+            'lines.*.rate' => ['required', 'numeric', 'min:0'],
+            'lines.*.item_id' => ['nullable', 'integer', 'min:1'],
+            'lines.*.trader_rate' => ['nullable', 'numeric', 'min:0'],
+            'lines.*.customer_account_id' => ['nullable', 'integer', 'min:1'],
+            // Charges
+            'charges' => ['nullable', 'array'],
+            'charges.commission_pct' => ['nullable', 'numeric', 'min:0'],
+            'charges.karaya' => ['nullable', 'numeric', 'min:0'],
+            'charges.kharch' => ['nullable', 'numeric', 'min:0'],
+            'charges.mazdoori' => ['nullable', 'numeric', 'min:0'],
+            'charges.market' => ['nullable', 'numeric', 'min:0'],
+            'charges.munshiana' => ['nullable', 'numeric', 'min:0'],
+            'charges.stor_karaya' => ['nullable', 'numeric', 'min:0'],
+            'charges.naqdi' => ['nullable', 'numeric', 'min:0'],
+        ]);
+
+        $db = $this->databases->connection($client);
+
+        $billToUpdate = null;
+        if (! empty($validated['bill_id'])) {
+            $billToUpdate = $db->table('bills')
+                ->where('bill_type', 2)
+                ->where('status', '!=', 'reversed')
+                ->where('id', $validated['bill_id'])
+                ->first();
+            abort_unless($billToUpdate, 404);
+        }
+
+        // ── Compute totals ────────────────────────────────
+        $totalNag = 0;
+        $totalGross = 0;
+        $totalDiff = 0;
+
+        $processedLines = [];
+        foreach ($validated['lines'] as $i => $line) {
+            $nag = (float) ($line['nag'] ?? 0);
+            $wazan = (float) ($line['wazan'] ?? 0);
+            $rate = (float) ($line['rate'] ?? 0);
+            $lagana = 0; // Khareed mein lagana nahi hota
+            $traderRate = isset($line['trader_rate']) && $line['trader_rate'] !== ''
+                          ? (float) $line['trader_rate'] : null;
+
+            // Khareed: amount = nag*rate  OR  wazan*rate
+            if ($wazan > 0) {
+                $custAmount = $wazan * $rate;
+            } else {
+                $custAmount = $nag * $rate;
+            }
+
+            if ($traderRate !== null && $traderRate > 0) {
+                $partyAmount = ($wazan > 0) ? $wazan * $traderRate : $nag * $traderRate;
+                $diffAmount = $nag * ($rate - $traderRate);
+            } else {
+                $partyAmount = $custAmount;
+                $diffAmount = 0;
+            }
+
+            $totalNag += $nag;
+            $totalGross += $partyAmount;
+            $totalDiff += $diffAmount;
+
+            $processedLines[] = [
+                'line_date' => Carbon::parse($validated['bill_date'])->toDateString(),
+                'customer_account_id' => isset($line['customer_account_id'])
+                                         ? (int) $line['customer_account_id'] : (int) $validated['party_account_id'],
+                'item_id' => isset($line['item_id']) ? (int) $line['item_id'] : null,
+                'nag' => $nag,
+                'wazan' => $wazan > 0 ? $wazan : null,
+                'rate' => $rate,
+                'lagana' => 0,
+                'trader_rate' => $traderRate,
+                'cust_amount' => round($custAmount, 2),
+                'party_amount' => round($partyAmount, 2),
+                'lagana_amount' => 0,
+                'diff_amount' => round($diffAmount, 2),
+                'sort_order' => $i,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ];
+        }
+
+        // ── Charges ───────────────────────────────────────
+        $chargesInput = $validated['charges'] ?? [];
+        $commPct = (float) ($chargesInput['commission_pct'] ?? 0);
+        $commAmount = round($totalGross * $commPct / 100, 2);
+        $karayaRate = (float) ($chargesInput['karaya'] ?? 0);
+        $kharchRate = (float) ($chargesInput['kharch'] ?? 0);
+        $mazdooriRate = (float) ($chargesInput['mazdoori'] ?? 0);
+        $marketRate = (float) ($chargesInput['market'] ?? 0);
+        $munshiRate = (float) ($chargesInput['munshiana'] ?? 0);
+        $storKaraya = (float) ($chargesInput['stor_karaya'] ?? 0);
+        $naqdi = (float) ($chargesInput['naqdi'] ?? 0);
+
+        $totalExpenses = $commAmount
+            + ($karayaRate * $totalNag)
+            + ($kharchRate * $totalNag)
+            + ($mazdooriRate * $totalNag)
+            + ($marketRate * $totalNag)
+            + ($munshiRate * $totalNag)
+            + ($storKaraya * $totalNag)
+            + $naqdi;
+
+        // ── DB Transaction ────────────────────────────────
+        try {
+            $db->beginTransaction();
+
+            if ($billToUpdate) {
+                $this->ledgerPoster->reverse($db, (int) $billToUpdate->id);
+            }
+
+            $billData = [
+                'inv_no' => $validated['inv_no'],
+                'bill_type' => 2,
+                'bill_date' => Carbon::parse($validated['bill_date'])->toDateString(),
+                'party_account_id' => (int) $validated['party_account_id'],
+                'marfat_account_id' => isset($validated['marfat_account_id'])
+                                       ? (int) $validated['marfat_account_id'] : null,
+                'item_id' => isset($validated['item_id'])
+                                       ? (int) $validated['item_id'] : null,
+                'marka' => $validated['marka'] ?? null,
+                'vehicle_no' => $validated['vehicle_no'] ?? null,
+                'container_no' => $validated['container_no'] ?? null,
+                'lot_nag' => $totalNag,
+                'status' => $validated['status'],
+                'updated_at' => now(),
+            ];
+
+            if ($billToUpdate) {
+                $billId = $billToUpdate->id;
+                $db->table('bills')->where('id', $billId)->update($billData);
+                $db->table('bill_lines')->where('bill_id', $billId)->delete();
+                $db->table('bill_charges')->where('bill_id', $billId)->delete();
+            } else {
+                $this->sharedBillSequence($db);
+                $db->table('doc_sequences')
+                    ->where('doc_type', 'bill:global')
+                    ->increment('current_number');
+                $billData['created_at'] = now();
+                $billId = $db->table('bills')->insertGetId($billData);
+            }
+
+            foreach ($processedLines as &$ln) {
+                $ln['bill_id'] = $billId;
+            }
+            $db->table('bill_lines')->insert($processedLines);
+
+            $chargeHeads = $db->table('charge_heads')
+                ->whereIn('name_en', array_values(self::CHARGE_KEYS))
+                ->get(['id', 'name_en'])
+                ->keyBy('name_en');
+
+            $chargeMap = [
+                'Commission' => ['rate' => $commPct,      'amount' => $commAmount],
+                'Karaya' => ['rate' => $karayaRate,   'amount' => round($karayaRate * $totalNag, 2)],
+                'Kharch' => ['rate' => $kharchRate,   'amount' => round($kharchRate * $totalNag, 2)],
+                'Mazdoori' => ['rate' => $mazdooriRate, 'amount' => round($mazdooriRate * $totalNag, 2)],
+                'Market Fee' => ['rate' => $marketRate,   'amount' => round($marketRate * $totalNag, 2)],
+                'Munshiana' => ['rate' => $munshiRate,   'amount' => round($munshiRate * $totalNag, 2)],
+                'Store Rent' => ['rate' => $storKaraya,   'amount' => round($storKaraya * $totalNag, 2)],
+                'Cash Payment' => ['rate' => 0,             'amount' => $naqdi],
+            ];
+
+            $chargeRows = [];
+            foreach ($chargeMap as $nameEn => $vals) {
+                if (! isset($chargeHeads[$nameEn])) {
+                    continue;
+                }
+                $chargeRows[] = [
+                    'bill_id' => $billId,
+                    'charge_head_id' => $chargeHeads[$nameEn]->id,
+                    'rate' => $vals['rate'],
+                    'amount' => $vals['amount'],
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ];
+            }
+            if (! empty($chargeRows)) {
+                $db->table('bill_charges')->insert($chargeRows);
+            }
+
+            if ($validated['status'] === 'posted') {
+                $this->ledgerPoster->post($db, (int) $billId);
+            }
+
+            $db->commit();
+
+        } catch (QueryException $e) {
+            $db->rollBack();
+            if (($e->errorInfo[1] ?? 0) === 1062 || ($e->errorInfo[0] ?? '') === '23000') {
+                return back()->withInput()
+                    ->withErrors(['inv_no' => 'یہ انوائس نمبر پہلے سے موجود ہے۔']);
+            }
+            throw $e;
+        } catch (Throwable $e) {
+            $db->rollBack();
+
+            throw $e;
+        }
+
+        $msg = $billToUpdate
+            ? 'خرید بل کامیابی سے اپ ڈیٹ ہوگیا۔'
+            : ($validated['status'] === 'pending'
+                ? 'بیجک نامکمل محفوظ ہوگیا۔'
+                : 'خرید بل کامیابی سے محفوظ ہوگیا۔');
+
+        return redirect()
+            ->route('client.portal.bills.khareed', [
+                'slug' => $client->slug,
+                ...($billToUpdate ? ['search' => $validated['inv_no']] : []),
+            ])
+            ->with('success', $msg);
+    }
+
+    public function destroy(Request $request, string $slug, int $bill): RedirectResponse
+    {
+        $client = $request->attributes->get('clientPortalClient');
+        abort_unless($client instanceof Client, 404);
+
+        $db = $this->databases->connection($client);
+        $billRecord = $db->table('bills')
+            ->where('id', $bill)
+            ->whereIn('bill_type', [1, 2])
+            ->where('status', '!=', 'reversed')
+            ->first();
+        abort_unless($billRecord, 404);
+
+        $db->transaction(function () use ($db, $billRecord): void {
+            if ($billRecord->status === 'posted') {
+                $this->ledgerPoster->reverse($db, (int) $billRecord->id);
+            }
+
+            $db->table('bills')->where('id', $billRecord->id)->update([
+                'status' => 'reversed',
+                'updated_at' => now(),
+            ]);
+        });
+
+        $destination = (int) $billRecord->bill_type === 1
+            ? 'client.portal.bills.sale'
+            : 'client.portal.bills.khareed';
+
+        return redirect()->route($destination, $client->slug)
+            ->with('success', 'بل حذف کرنے کے بجائے الٹ اندراج کے ساتھ محفوظ کر دیا گیا۔');
+    }
+
     private function validatedReportFilters(Request $request): array
     {
         $validated = $request->validate([

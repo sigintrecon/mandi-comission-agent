@@ -110,6 +110,8 @@
         <div class="grid">
           <label>ادارے کا نام<input name="firm_name" value="{{ old('firm_name', $settings['firm_name'] ?? $client->name) }}"></label>
           <label>فون<input name="phone" value="{{ old('phone', $settings['phone'] ?? $client->phone) }}"></label>
+          <label>فون 2<input name="phone_2" value="{{ old('phone_2', $settings['phone_2'] ?? '') }}"></label>
+          <label>فون 3<input name="phone_3" value="{{ old('phone_3', $settings['phone_3'] ?? '') }}"></label>
           <label>پتہ<input name="address" value="{{ old('address', $settings['address'] ?? $client->address) }}"></label>
         </div><div class="actions"><button type="submit">سیٹنگز محفوظ کریں</button></div>
       </form>

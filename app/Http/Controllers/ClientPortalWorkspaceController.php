@@ -427,6 +427,8 @@ class ClientPortalWorkspaceController extends Controller
         $validated = $request->validate([
             'firm_name' => ['nullable', 'string', 'max:255'],
             'phone' => ['nullable', 'string', 'max:30'],
+            'phone_2' => ['nullable', 'string', 'max:30'],
+            'phone_3' => ['nullable', 'string', 'max:30'],
             'address' => ['nullable', 'string', 'max:500'],
         ]);
 
